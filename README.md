@@ -2,6 +2,8 @@
 
 Rockchip 단말 OTP `device_id` 기반으로 88바이트 라이선스를 TCP로 발급하는 서버입니다.
 
+**GitHub 저장소 이름:** `scream_license_server` (공백은 URL에 사용할 수 없어 밑줄 사용)
+
 ## 요구 사항
 
 - Node.js 18+ 권장
@@ -46,11 +48,13 @@ git init
 git add .
 git commit -m "Initial import: scream license server"
 git branch -M main
-git remote add origin git@github.com:YOUR_USER/YOUR_REPO.git
+git remote add origin git@github.com:gourry7/scream_license_server.git
 git push -u origin main
 ```
 
-`YOUR_USER/YOUR_REPO` 는 본인 계정과 새 저장소 이름으로 바꿉니다.
+또는 HTTPS:
+
+`git remote add origin https://github.com/gourry7/scream_license_server.git`
 
 ## 데이터
 
