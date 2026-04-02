@@ -10,3 +10,7 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /health
+    envVars:
+      # Render가 RENDER / RENDER_EXTERNAL_URL 도 넣음. 없으면 HTTP 통합 모드 강제.
+      - key: LICENSE_HTTP_UNIFIED
+        value: "1"

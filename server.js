@@ -184,10 +184,16 @@ function handleRenderHttp(req, res) {
   res.end('Not Found');
 }
 
-// Render: RENDER=true 이면 TCP 대신 HTTP만 process.env.PORT 에 바인딩
-const isRender = process.env.RENDER === 'true';
+// Render / PaaS: 공인 URL은 HTTP(S) 한 포트만. TCP 2000은 외부에 안 붙고,
+// 로드밸런서가 보내는 HTTP가 TCP 소켓에 섞여 들어오면 JSON.parse 가 깨짐.
+// RENDER_EXTERNAL_URL 은 Render가 항상 넣음. RENDER 는 문자열 "true".
+const useUnifiedHttp =
+  process.env.RENDER === 'true' ||
+  process.env.RENDER === '1' ||
+  Boolean(process.env.RENDER_EXTERNAL_URL) ||
+  process.env.LICENSE_HTTP_UNIFIED === '1';
 
-if (isRender) {
+if (useUnifiedHttp) {
   const port = Number(process.env.PORT) || 10000;
   const renderHttp = http.createServer(handleRenderHttp);
   renderHttp.listen(port, '0.0.0.0', () => {
@@ -370,7 +376,7 @@ function renderHtmlDashboard() {
 </html>`;
 }
 
-if (!isRender) {
+if (!useUnifiedHttp) {
   const httpServer = http.createServer((req, res) => {
     if (req.url === '/' || req.url === '/index.html') {
       const html = renderHtmlDashboard();
