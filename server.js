@@ -23,8 +23,129 @@ const TCP_HOST = '0.0.0.0'; // 실제 서비스 시 169.211.234.68 에서 바인
 const HTTP_PORT = 3000;
 const HTTP_HOST = '0.0.0.0';
 
-const DATA_DIR = path.join(__dirname, 'data');
+// Render 무료 티어 등: 로컬 디스크는 재시작 시 유실됨
+// → LICENSE_GITHUB_TOKEN 이면 기본으로 github.com/gourry7/scream_license_server 의 data/licenses.json 을 읽고 커밋
+//   (LICENSE_GITHUB_REPO 로 덮어쓰기 가능). 또는 DATABASE_URL, LICENSE_DATA_DIR
+/** 기본 GitHub 저장소 (LICENSE_GITHUB_TOKEN 만 넣을 때 사용). 환경변수 DEFAULT_LICENSE_GITHUB_REPO 로 변경 가능 */
+const DEFAULT_LICENSE_GITHUB_REPO = (
+  process.env.DEFAULT_LICENSE_GITHUB_REPO || 'gourry7/scream_license_server'
+).trim();
+const DATA_DIR = process.env.LICENSE_DATA_DIR
+  ? path.resolve(process.env.LICENSE_DATA_DIR)
+  : path.join(__dirname, 'data');
 const LICENSE_DB_PATH = path.join(DATA_DIR, 'licenses.json');
+
+/** @type {'file' | 'postgres' | 'github'} */
+let storageMode = 'file';
+
+/** @type {import('pg').Pool | null} */
+let pgPool = null;
+/** PostgreSQL 사용 시 메모리 캐시 */
+let pgDbCache = null;
+
+/** GitHub Contents API 사용 시 */
+let githubDbCache = null;
+/** @type {string | null} 현재 파일 SHA (업데이트 시 필요) */
+let githubFileSha = null;
+let githubSaveChain = Promise.resolve();
+let githubOwner = '';
+let githubRepo = '';
+let githubPath = 'data/licenses.json';
+let githubBranch = 'main';
+let githubToken = '';
+
+const GITHUB_API = 'https://api.github.com';
+
+function githubContentsUrl() {
+  const enc = githubPath.split('/').map(encodeURIComponent).join('/');
+  return `${GITHUB_API}/repos/${githubOwner}/${githubRepo}/contents/${enc}`;
+}
+
+async function githubRequest(method, url, jsonBody) {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${githubToken}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'scream-license-server',
+  };
+  if (jsonBody !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined,
+  });
+  const text = await res.text();
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = null;
+  }
+  if (!res.ok) {
+    const msg = parsed && parsed.message ? parsed.message : text || res.statusText;
+    const err = new Error(`GitHub ${res.status}: ${msg}`);
+    err.status = res.status;
+    throw err;
+  }
+  return parsed;
+}
+
+async function githubLoadInitial() {
+  const getUrl = `${githubContentsUrl()}?ref=${encodeURIComponent(githubBranch)}`;
+  try {
+    const meta = await githubRequest('GET', getUrl);
+    githubFileSha = meta.sha;
+    const raw = Buffer.from(meta.content, 'base64').toString('utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed.devices) parsed.devices = {};
+    if (!parsed.issues) parsed.issues = [];
+    githubDbCache = parsed;
+  } catch (e) {
+    if (e.status === 404) {
+      githubDbCache = { devices: {}, issues: [] };
+      githubFileSha = null;
+      await githubPersistNow();
+    } else {
+      throw e;
+    }
+  }
+}
+
+async function githubPersistNow() {
+  const content = Buffer.from(JSON.stringify(githubDbCache, null, 2), 'utf8').toString('base64');
+  const body = {
+    message: `license: update ${new Date().toISOString()}`,
+    content,
+    branch: githubBranch,
+  };
+  if (githubFileSha) {
+    body.sha = githubFileSha;
+  }
+  const res = await githubRequest('PUT', githubContentsUrl(), body);
+  if (res && res.content && res.content.sha) {
+    githubFileSha = res.content.sha;
+  }
+}
+
+function githubQueuePersist() {
+  githubSaveChain = githubSaveChain
+    .then(() => githubPersistNow())
+    .catch(async (e) => {
+      console.error('GitHub persist failed:', e.message || e);
+      if (e.status === 409) {
+        try {
+          const getUrl = `${githubContentsUrl()}?ref=${encodeURIComponent(githubBranch)}`;
+          const meta = await githubRequest('GET', getUrl);
+          githubFileSha = meta.sha;
+          await githubPersistNow();
+        } catch (e2) {
+          console.error('GitHub retry after conflict failed:', e2.message || e2);
+        }
+      }
+    });
+}
 
 // C 코드의 ENCRYPTION_KEY 와 동일한 비밀키 (MAC 용)
 // 0x4B,0x59,0x42,0x45,0x52,0x5F,0x53,0x43,0x52,0x45,0x41,0x4D,0x5F,0x4D,0x4F,0x44,
@@ -34,20 +155,112 @@ const MAC_KEY = Buffer.from(
   'hex'
 );
 
-function loadLicenseDb() {
+function loadLicenseDbFromFile() {
   try {
     const buf = fs.readFileSync(LICENSE_DB_PATH, 'utf8');
-    return JSON.parse(buf);
+    const parsed = JSON.parse(buf);
+    if (!parsed.devices) parsed.devices = {};
+    if (!parsed.issues) parsed.issues = [];
+    return parsed;
   } catch (e) {
-    return { devices: {} };
+    return { devices: {}, issues: [] };
   }
 }
 
+function loadLicenseDb() {
+  if (storageMode === 'github' && githubDbCache) {
+    return githubDbCache;
+  }
+  if (storageMode === 'postgres' && pgPool && pgDbCache) {
+    return pgDbCache;
+  }
+  return loadLicenseDbFromFile();
+}
+
 function saveLicenseDb(db) {
+  if (storageMode === 'github') {
+    githubDbCache = db;
+    githubQueuePersist();
+    return;
+  }
+  if (storageMode === 'postgres' && pgPool) {
+    pgDbCache = db;
+    pgPool
+      .query('UPDATE license_state SET data = $1::jsonb WHERE id = 1', [JSON.stringify(db)])
+      .catch((e) => console.error('License DB persist failed:', e));
+    return;
+  }
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
   fs.writeFileSync(LICENSE_DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+}
+
+async function initLicenseStorage() {
+  const ghToken = (process.env.LICENSE_GITHUB_TOKEN || '').trim();
+  let ghRepo = (process.env.LICENSE_GITHUB_REPO || '').trim();
+  if (ghToken) {
+    if (!ghRepo) {
+      ghRepo = DEFAULT_LICENSE_GITHUB_REPO;
+    }
+    const parts = ghRepo.split('/').filter(Boolean);
+    if (parts.length !== 2) {
+      throw new Error('LICENSE_GITHUB_REPO must be "owner/repo"');
+    }
+    [githubOwner, githubRepo] = parts;
+    githubToken = ghToken;
+    githubPath = (process.env.LICENSE_GITHUB_PATH || 'data/licenses.json').replace(/^\//, '');
+    githubBranch = (process.env.LICENSE_GITHUB_BRANCH || 'main').trim();
+    storageMode = 'github';
+    await githubLoadInitial();
+    console.log(
+      `License DB: GitHub ${githubOwner}/${githubRepo}@${githubBranch}:${githubPath}`
+    );
+    return;
+  }
+
+  if (process.env.DATABASE_URL) {
+    const { Pool } = require('pg');
+    const ssl =
+      process.env.DATABASE_SSL === '0'
+        ? false
+        : { rejectUnauthorized: false };
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 5,
+      ssl,
+    });
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS license_state (
+        id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        data JSONB NOT NULL
+      );
+    `);
+    const r = await pgPool.query('SELECT data FROM license_state WHERE id = 1');
+    if (r.rows.length === 0) {
+      pgDbCache = { devices: {}, issues: [] };
+      await pgPool.query('INSERT INTO license_state (id, data) VALUES (1, $1::jsonb)', [
+        JSON.stringify(pgDbCache),
+      ]);
+    } else {
+      let row = r.rows[0].data;
+      if (typeof row === 'string') {
+        row = JSON.parse(row);
+      }
+      if (!row.devices) row.devices = {};
+      if (!row.issues) row.issues = [];
+      pgDbCache = row;
+    }
+    storageMode = 'postgres';
+    console.log('License DB: PostgreSQL (persistent across restarts)');
+    return;
+  }
+
+  storageMode = 'file';
+  console.log('License DB: JSON file', LICENSE_DB_PATH);
+  console.log(
+    'Hint: on Render free tier, set LICENSE_GITHUB_TOKEN + LICENSE_GITHUB_REPO, or DATABASE_URL.'
+  );
 }
 
 function logLicenseIssue(deviceIdBuf, licenseBuf, signatureBuf, companyFromClient) {
@@ -193,51 +406,70 @@ const useUnifiedHttp =
   Boolean(process.env.RENDER_EXTERNAL_URL) ||
   process.env.LICENSE_HTTP_UNIFIED === '1';
 
-if (useUnifiedHttp) {
-  const port = Number(process.env.PORT) || 10000;
-  const renderHttp = http.createServer(handleRenderHttp);
-  renderHttp.listen(port, '0.0.0.0', () => {
-    console.log(`Render mode: HTTP 0.0.0.0:${port}  GET /  GET /health  POST /issue`);
-  });
-} else {
-  const tcpServer = net.createServer((socket) => {
-    console.log('Client connected from', socket.remoteAddress, socket.remotePort);
+function startListeners() {
+  if (useUnifiedHttp) {
+    const port = Number(process.env.PORT) || 10000;
+    const renderHttp = http.createServer(handleRenderHttp);
+    renderHttp.listen(port, '0.0.0.0', () => {
+      console.log(`Render mode: HTTP 0.0.0.0:${port}  GET /  GET /health  POST /issue`);
+    });
+  } else {
+    const tcpServer = net.createServer((socket) => {
+      console.log('Client connected from', socket.remoteAddress, socket.remotePort);
 
-    let buf = Buffer.alloc(0);
+      let buf = Buffer.alloc(0);
 
-    socket.on('data', (data) => {
-      buf = Buffer.concat([buf, data]);
-      const newlineIndex = buf.indexOf(0x0a); // '\n'
-      if (newlineIndex === -1) {
-        return;
+      socket.on('data', (data) => {
+        buf = Buffer.concat([buf, data]);
+        const newlineIndex = buf.indexOf(0x0a); // '\n'
+        if (newlineIndex === -1) {
+          return;
+        }
+
+        const line = buf.slice(0, newlineIndex).toString('utf8').trim();
+
+        try {
+          const payload = JSON.parse(line);
+          const license = issueLicenseFromPayload(payload);
+          socket.write(license);
+          socket.end();
+          console.log('License sent (88 bytes).');
+        } catch (e) {
+          console.error('Error while handling request:', e);
+          socket.destroy();
+        }
+      });
+
+      socket.on('error', (err) => {
+        console.error('Socket error:', err.message);
+      });
+
+      socket.on('end', () => {
+        console.log('Client disconnected');
+      });
+    });
+
+    tcpServer.listen(TCP_PORT, TCP_HOST, () => {
+      console.log(`License TCP server listening on ${TCP_HOST}:${TCP_PORT}`);
+    });
+  }
+
+  if (!useUnifiedHttp) {
+    const httpServer = http.createServer((req, res) => {
+      if (req.url === '/' || req.url === '/index.html') {
+        const html = renderHtmlDashboard();
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Not Found');
       }
-
-      const line = buf.slice(0, newlineIndex).toString('utf8').trim();
-
-      try {
-        const payload = JSON.parse(line);
-        const license = issueLicenseFromPayload(payload);
-        socket.write(license);
-        socket.end();
-        console.log('License sent (88 bytes).');
-      } catch (e) {
-        console.error('Error while handling request:', e);
-        socket.destroy();
-      }
     });
 
-    socket.on('error', (err) => {
-      console.error('Socket error:', err.message);
+    httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+      console.log(`License HTTP dashboard listening on http://${HTTP_HOST}:${HTTP_PORT}/`);
     });
-
-    socket.on('end', () => {
-      console.log('Client disconnected');
-    });
-  });
-
-  tcpServer.listen(TCP_PORT, TCP_HOST, () => {
-    console.log(`License TCP server listening on ${TCP_HOST}:${TCP_PORT}`);
-  });
+  }
 }
 
 // 간단한 HTML 대시보드 서버
@@ -376,20 +608,12 @@ function renderHtmlDashboard() {
 </html>`;
 }
 
-if (!useUnifiedHttp) {
-  const httpServer = http.createServer((req, res) => {
-    if (req.url === '/' || req.url === '/index.html') {
-      const html = renderHtmlDashboard();
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(html);
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Not Found');
-    }
+initLicenseStorage()
+  .then(() => {
+    startListeners();
+  })
+  .catch((err) => {
+    console.error('initLicenseStorage failed:', err);
+    process.exit(1);
   });
-
-  httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
-    console.log(`License HTTP dashboard listening on http://${HTTP_HOST}:${HTTP_PORT}/`);
-  });
-}
 

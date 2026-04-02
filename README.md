@@ -54,9 +54,22 @@ python3 request_license.py
 **주의 (무료 플랜):**
 
 - 인스턴스가 **일정 시간 요청 없으면 슬립** → 첫 요청이 느릴 수 있음  
-- 디스크가 **유실될 수 있음** → `data/licenses.json` 이력은 재배포 시 날아갈 수 있음 (중요하면 유료 디스크 또는 외부 DB 검토)
+- **로컬 디스크는 재시작·재배포 시 초기화**될 수 있음 → 발급 이력을 유지하려면 아래 **GitHub 저장소 연동** 또는 `DATABASE_URL`(PostgreSQL) 사용
 
 저장소 루트의 `render.yaml`로 Blueprint 배포도 가능합니다.
+
+### 발급 이력을 GitHub에 저장·불러오기 (Render 권장)
+
+Render는 디스크가 휘발성이므로, 발급 이력은 **[gourry7/scream_license_server](https://github.com/gourry7/scream_license_server)** 저장소의 `data/licenses.json` 에 **GitHub Contents API**로 읽고 커밋합니다.
+
+1. GitHub에서 **Fine-grained personal access token** (또는 classic PAT `repo`) 발급: 저장소 `gourry7/scream_license_server` 에 대해 **Contents: Read and write** (또는 전체 `repo`).  
+2. (선택) 저장소에 `data/licenses.json` 을 커밋해 두거나, 없으면 서버가 첫 발급 시 파일을 생성합니다. (로컬 개발용으로는 `.gitignore` 때문에 커밋되지 않을 수 있어도, API로 원격에 생성 가능합니다.)  
+3. Render → Web Service → **Environment** → **Secret** 에 **`LICENSE_GITHUB_TOKEN`** 만 넣으면 됩니다.  
+   - `LICENSE_GITHUB_REPO` 는 생략 시 자동으로 `gourry7/scream_license_server` 입니다 (`render.yaml`에도 동일).  
+   - 다른 포크/저장소를 쓰려면 `LICENSE_GITHUB_REPO` 를 직접 지정하거나 `DEFAULT_LICENSE_GITHUB_REPO` 를 설정합니다.  
+4. 선택 env: `LICENSE_GITHUB_PATH`(기본 `data/licenses.json`), `LICENSE_GITHUB_BRANCH`(기본 `main`).
+
+**저장 백엔드 우선순위:** `LICENSE_GITHUB_TOKEN` 이 있으면 GitHub → 그다음 `DATABASE_URL`(PostgreSQL) → 없으면 로컬 `data/licenses.json` 파일.
 
 ## GitHub에 올리기 (비밀번호로 push 불가)
 
@@ -91,4 +104,5 @@ git push -u origin main
 
 ## 데이터
 
-`data/licenses.json`은 발급 이력을 담으므로 **저장소에 커밋하지 않습니다** (`.gitignore`). 서버마다 로컬에서 복사해 사용하세요.
+- **GitHub 모드(Render, 토큰 설정 시):** [scream_license_server](https://github.com/gourry7/scream_license_server) 의 `data/licenses.json` 이 진본입니다.  
+- **파일 모드(토큰 없음·로컬):** `data/licenses.json` 은 `.gitignore` 로 **커밋하지 않습니다**. 로컬에서는 `licenses.json.example` 을 복사해 쓰세요.

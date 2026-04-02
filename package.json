@@ -10,7 +10,8 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "js-sha3": "^0.8.0"
+    "js-sha3": "^0.8.0",
+    "pg": "^8.13.1"
   }
 }
 
