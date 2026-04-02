@@ -111,57 +111,128 @@ function buildLicense(deviceIdBuf) {
   return lic;
 }
 
-const tcpServer = net.createServer((socket) => {
-  console.log('Client connected from', socket.remoteAddress, socket.remotePort);
+/** TCP·HTTP 공통: JSON payload → 88바이트 라이선스 */
+function issueLicenseFromPayload(payload) {
+  const deviceIdHex = String(payload.deviceId || '').toLowerCase();
+  const company = (payload.company || 'Unknown').toString();
 
-  let buf = Buffer.alloc(0);
+  if (!/^[0-9a-f]{32}$/.test(deviceIdHex)) {
+    throw new Error('invalid deviceId hex');
+  }
 
-  socket.on('data', (data) => {
-    buf = Buffer.concat([buf, data]);
-    const newlineIndex = buf.indexOf(0x0a); // '\n'
-    if (newlineIndex === -1) {
-      return;
-    }
+  const deviceId = Buffer.from(deviceIdHex, 'hex');
+  console.log('Received device_id:', deviceIdHex, 'company:', company);
 
-    const line = buf.slice(0, newlineIndex).toString('utf8').trim();
-    // 나머지 데이터는 현재 프로토콜에선 사용하지 않음
+  const license = buildLicense(deviceId);
+  logLicenseIssue(deviceId, license, license.subarray(24, 24 + 64), company);
+  return license;
+}
 
-    try {
-      const payload = JSON.parse(line);
-      const deviceIdHex = String(payload.deviceId || '').toLowerCase();
-      const company = (payload.company || 'Unknown').toString();
+function readHttpBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
 
-      if (!/^[0-9a-f]{32}$/.test(deviceIdHex)) {
-        throw new Error('invalid deviceId hex');
+/** Render 등: HTTP 한 포트만 사용 (POST /issue → 88바이트 octet-stream) */
+function handleRenderHttp(req, res) {
+  const url = (req.url || '').split('?')[0];
+
+  if (req.method === 'GET' && (url === '/' || url === '/index.html')) {
+    const html = renderHtmlDashboard();
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+
+  if (req.method === 'GET' && url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('ok');
+    return;
+  }
+
+  if (req.method === 'POST' && (url === '/issue' || url === '/license')) {
+    readHttpBody(req)
+      .then((body) => {
+        try {
+          const payload = JSON.parse(body.toString('utf8'));
+          const license = issueLicenseFromPayload(payload);
+          res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': license.length,
+          });
+          res.end(license);
+          console.log('License sent (HTTP, 88 bytes).');
+        } catch (e) {
+          console.error('HTTP /issue error:', e);
+          res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(String(e.message || e));
+        }
+      })
+      .catch((e) => {
+        console.error(e);
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('internal error');
+      });
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Not Found');
+}
+
+// Render: RENDER=true 이면 TCP 대신 HTTP만 process.env.PORT 에 바인딩
+const isRender = process.env.RENDER === 'true';
+
+if (isRender) {
+  const port = Number(process.env.PORT) || 10000;
+  const renderHttp = http.createServer(handleRenderHttp);
+  renderHttp.listen(port, '0.0.0.0', () => {
+    console.log(`Render mode: HTTP 0.0.0.0:${port}  GET /  GET /health  POST /issue`);
+  });
+} else {
+  const tcpServer = net.createServer((socket) => {
+    console.log('Client connected from', socket.remoteAddress, socket.remotePort);
+
+    let buf = Buffer.alloc(0);
+
+    socket.on('data', (data) => {
+      buf = Buffer.concat([buf, data]);
+      const newlineIndex = buf.indexOf(0x0a); // '\n'
+      if (newlineIndex === -1) {
+        return;
       }
 
-      const deviceId = Buffer.from(deviceIdHex, 'hex');
-      console.log('Received device_id:', deviceIdHex, 'company:', company);
+      const line = buf.slice(0, newlineIndex).toString('utf8').trim();
 
-      const license = buildLicense(deviceId);
-      // 로그에 라이센스 발급 정보 저장
-      logLicenseIssue(deviceId, license, license.subarray(24, 24 + 64), company);
-      socket.write(license);
-      socket.end();
-      console.log('License sent (88 bytes).');
-    } catch (e) {
-      console.error('Error while handling request:', e);
-      socket.destroy();
-    }
+      try {
+        const payload = JSON.parse(line);
+        const license = issueLicenseFromPayload(payload);
+        socket.write(license);
+        socket.end();
+        console.log('License sent (88 bytes).');
+      } catch (e) {
+        console.error('Error while handling request:', e);
+        socket.destroy();
+      }
+    });
+
+    socket.on('error', (err) => {
+      console.error('Socket error:', err.message);
+    });
+
+    socket.on('end', () => {
+      console.log('Client disconnected');
+    });
   });
 
-  socket.on('error', (err) => {
-    console.error('Socket error:', err.message);
+  tcpServer.listen(TCP_PORT, TCP_HOST, () => {
+    console.log(`License TCP server listening on ${TCP_HOST}:${TCP_PORT}`);
   });
-
-  socket.on('end', () => {
-    console.log('Client disconnected');
-  });
-});
-
-tcpServer.listen(TCP_PORT, TCP_HOST, () => {
-  console.log(`License TCP server listening on ${TCP_HOST}:${TCP_PORT}`);
-});
+}
 
 // 간단한 HTML 대시보드 서버
 function renderHtmlDashboard() {
@@ -299,18 +370,20 @@ function renderHtmlDashboard() {
 </html>`;
 }
 
-const httpServer = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/index.html') {
-    const html = renderHtmlDashboard();
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(html);
-  } else {
-    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Not Found');
-  }
-});
+if (!isRender) {
+  const httpServer = http.createServer((req, res) => {
+    if (req.url === '/' || req.url === '/index.html') {
+      const html = renderHtmlDashboard();
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not Found');
+    }
+  });
 
-httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
-  console.log(`License HTTP dashboard listening on http://${HTTP_HOST}:${HTTP_PORT}/`);
-});
+  httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+    console.log(`License HTTP dashboard listening on http://${HTTP_HOST}:${HTTP_PORT}/`);
+  });
+}
 

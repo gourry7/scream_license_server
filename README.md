@@ -22,8 +22,41 @@ cp data/licenses.json.example data/licenses.json
 npm start
 ```
 
+로컬(또는 일반 VPS)에서는:
+
 - TCP **2000**: 라이선스 발급 (`{"deviceId":"<hex>","company":"..."}\n` → 88바이트)
 - HTTP **3000**: 발급 이력 대시보드 `http://localhost:3000/`
+
+### Render.com 에 올리기
+
+Render는 **공개 포트가 HTTP(S) 하나**라서, 배포 시에는 **TCP 2000을 쓰지 않고** `RENDER=true` 일 때만 **HTTP 한 포트**로 동작합니다.
+
+- `GET /` — 대시보드 (기존과 동일)
+- `GET /health` — 헬스 체크 (Render용)
+- `POST /issue` — 본문 JSON `{"deviceId":"<hex>","company":"..."}` → 응답 **88바이트** `application/octet-stream`
+
+**Render 대시보드에서 Web Service 생성:**
+
+1. New → Web Service → GitHub의 `scream_license_server` 연결  
+2. Runtime: **Node**  
+3. Build: `npm install`  
+4. Start: `node server.js`  
+5. (선택) Health Check Path: `/health`  
+
+배포 후 URL이 예: `https://scream-license-server.onrender.com` 이면, 클라이언트(PC)에서는:
+
+```bash
+export LICENSE_USE_HTTP=1
+export LICENSE_HTTP_URL="https://scream-license-server.onrender.com/issue"
+python3 request_license.py
+```
+
+**주의 (무료 플랜):**
+
+- 인스턴스가 **일정 시간 요청 없으면 슬립** → 첫 요청이 느릴 수 있음  
+- 디스크가 **유실될 수 있음** → `data/licenses.json` 이력은 재배포 시 날아갈 수 있음 (중요하면 유료 디스크 또는 외부 DB 검토)
+
+저장소 루트의 `render.yaml`로 Blueprint 배포도 가능합니다.
 
 ## GitHub에 올리기 (비밀번호로 push 불가)
 

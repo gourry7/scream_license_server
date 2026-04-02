@@ -2,6 +2,9 @@
   "name": "scream-license-server",
   "version": "1.0.0",
   "description": "License server for scream detector devices (TCP, SHAKE256-MAC based licenses)",
+  "engines": {
+    "node": ">=18"
+  },
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

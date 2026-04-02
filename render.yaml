@@ -1,0 +1,12 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Dashboard에서 New → Blueprint 로 이 저장소 연결해도 되고,
+# Web Service 하나만 수동으로 만들어도 됩니다.
+
+services:
+  - type: web
+    name: scream-license-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
