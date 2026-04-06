@@ -23,6 +23,14 @@
       "lastSeenAt": "2026-04-06T00:57:51.066Z",
       "issueCount": 1,
       "lastSignature": "529b7905e180d8a5b4c4fe92336523a8f0dac7d62a068cc84defcd80d7f0a715ffc5163286d9214bff02847ed919bf948a52597a3ce1649962405820e78b98d6"
+    },
+    "55524b59333030303600000000022735": {
+      "deviceId": "55524b59333030303600000000022735",
+      "company": "celtech",
+      "firstSeenAt": "2026-04-06T02:25:00.838Z",
+      "lastSeenAt": "2026-04-06T02:25:00.838Z",
+      "issueCount": 1,
+      "lastSignature": "fd113a496d1554ce57b85e71aa31d2f20c611d5dc357cce2edd665c3c2c931e2b913b4e076c9e99252860f56e16a2774080160f2d92f195f05c44e29ef6b4c1b"
     }
   },
   "issues": [
@@ -40,6 +48,11 @@
       "deviceId": "55524b59333030303600000000022732",
       "company": "셀텍원드",
       "issuedAt": "2026-04-06T00:57:51.066Z"
+    },
+    {
+      "deviceId": "55524b59333030303600000000022735",
+      "company": "celtech",
+      "issuedAt": "2026-04-06T02:25:00.838Z"
     }
   ]
 }
