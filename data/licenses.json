@@ -2,10 +2,10 @@
   "devices": {
     "55524b59323230303800000000092f3b": {
       "deviceId": "55524b59323230303800000000092f3b",
-      "company": "셀텍월드",
+      "company": "Unknown",
       "firstSeenAt": "2026-04-02T05:14:03.740Z",
-      "lastSeenAt": "2026-04-02T05:14:03.740Z",
-      "issueCount": 1,
+      "lastSeenAt": "2026-04-15T07:42:45.365Z",
+      "issueCount": 2,
       "lastSignature": "0d223dcdd8083630671e5b87064a183b96abaa2b1627f9369809b904fa1ab5cd05f3eceb5041ac985a11e2408f2a7e0ba07b6a2c9d43e5dfe2893c0a52f96da3"
     },
     "554a3532323500000000000000131324": {
@@ -71,6 +71,11 @@
       "deviceId": "55524b59323230303800000000092f31",
       "company": "Test board",
       "issuedAt": "2026-04-06T03:41:16.494Z"
+    },
+    {
+      "deviceId": "55524b59323230303800000000092f3b",
+      "company": "Unknown",
+      "issuedAt": "2026-04-15T07:42:45.365Z"
     }
   ]
 }
