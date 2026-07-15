@@ -84,8 +84,8 @@
       "deviceId": "55524b59333030303600000000022d43",
       "company": "Unknown",
       "firstSeenAt": "2026-07-15T01:32:55.148Z",
-      "lastSeenAt": "2026-07-15T01:32:55.148Z",
-      "issueCount": 1,
+      "lastSeenAt": "2026-07-15T01:42:57.202Z",
+      "issueCount": 2,
       "lastSignature": "369b193b49f1b0eb24c567b380cf63e7b4d2d7bbf60f5957f380e36f8ce84ee66011817104a0e63bf2b1369a29a8a7acc4f33eddbea3bbb8d81a3a6d35e42ca2"
     }
   },
@@ -169,6 +169,11 @@
       "deviceId": "55524b59333030303600000000022d43",
       "company": "Unknown",
       "issuedAt": "2026-07-15T01:32:55.148Z"
+    },
+    {
+      "deviceId": "55524b59333030303600000000022d43",
+      "company": "Unknown",
+      "issuedAt": "2026-07-15T01:42:57.202Z"
     }
   ]
 }
