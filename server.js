@@ -196,6 +196,70 @@ function saveLicenseDb(db) {
   fs.writeFileSync(LICENSE_DB_PATH, JSON.stringify(db, null, 2), 'utf8');
 }
 
+/** 편집 API용: 저장이 끝날 때까지 대기 (GitHub 커밋 포함) */
+async function saveLicenseDbAsync(db) {
+  if (storageMode === 'github') {
+    githubDbCache = db;
+    githubQueuePersist();
+    await githubSaveChain;
+    return;
+  }
+  if (storageMode === 'postgres' && pgPool) {
+    pgDbCache = db;
+    await pgPool.query('UPDATE license_state SET data = $1::jsonb WHERE id = 1', [
+      JSON.stringify(db),
+    ]);
+    return;
+  }
+  saveLicenseDb(db);
+}
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function adminTokenExpected() {
+  return (process.env.LICENSE_ADMIN_TOKEN || '').trim();
+}
+
+function checkAdminAuth(req) {
+  const expected = adminTokenExpected();
+  if (!expected) return true;
+  const got =
+    (req.headers['x-admin-token'] || '').trim() ||
+    (() => {
+      try {
+        const u = new URL(req.url || '/', 'http://localhost');
+        return (u.searchParams.get('token') || '').trim();
+      } catch {
+        return '';
+      }
+    })();
+  return got === expected;
+}
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+}
+
+function normalizeDeviceIdParam(raw) {
+  const id = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^0-9a-f]/g, '');
+  return /^[0-9a-f]{32}$/.test(id) ? id : null;
+}
+
 async function initLicenseStorage() {
   const ghToken = (process.env.LICENSE_GITHUB_TOKEN || '').trim();
   let ghRepo = (process.env.LICENSE_GITHUB_REPO || '').trim();
@@ -286,8 +350,9 @@ function logLicenseIssue(deviceIdBuf, licenseBuf, signatureBuf, companyFromClien
       rec.company = companyFromClient;
     }
     rec.lastSeenAt = nowIso;
-    rec.issueCount += 1;
+    rec.issueCount = (rec.issueCount || 0) + 1;
     rec.lastSignature = signatureBuf.toString('hex');
+    // note / updatedAt 은 웹 편집 값을 유지
   }
 
   // 전체 발급 이력에 한 건 추가
@@ -350,24 +415,126 @@ function readHttpBody(req) {
   });
 }
 
-/** Render 등: HTTP 한 포트만 사용 (POST /issue → 88바이트 octet-stream) */
-function handleRenderHttp(req, res) {
-  const url = (req.url || '').split('?')[0];
+async function handleApiDevicesUpdate(req, res, deviceId) {
+  if (!checkAdminAuth(req)) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  const body = await readHttpBody(req);
+  let payload;
+  try {
+    payload = JSON.parse(body.toString('utf8') || '{}');
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON' });
+    return;
+  }
 
-  if (req.method === 'GET' && (url === '/' || url === '/index.html')) {
+  const db = loadLicenseDb();
+  if (!db.devices) db.devices = {};
+  const rec = db.devices[deviceId];
+  if (!rec) {
+    sendJson(res, 404, { error: 'device not found' });
+    return;
+  }
+
+  if (payload.company !== undefined) {
+    const company = String(payload.company || '').trim() || 'Unknown';
+    rec.company = company;
+    // 같은 deviceId 발급 이력의 company 도 맞춤
+    if (Array.isArray(db.issues)) {
+      for (const iss of db.issues) {
+        if (iss.deviceId === deviceId) iss.company = company;
+      }
+    }
+  }
+  if (payload.note !== undefined) {
+    rec.note = String(payload.note || '').slice(0, 500);
+  }
+  rec.updatedAt = new Date().toISOString();
+  db.devices[deviceId] = rec;
+
+  await saveLicenseDbAsync(db);
+  console.log('Device updated:', deviceId, 'company=', rec.company);
+  sendJson(res, 200, { ok: true, device: rec });
+}
+
+async function handleApiDevicesDelete(req, res, deviceId) {
+  if (!checkAdminAuth(req)) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  const db = loadLicenseDb();
+  if (!db.devices || !db.devices[deviceId]) {
+    sendJson(res, 404, { error: 'device not found' });
+    return;
+  }
+  delete db.devices[deviceId];
+  // 이력은 남겨 두되, 쿼리 ?purgeIssues=1 이면 함께 삭제
+  let purge = false;
+  try {
+    const u = new URL(req.url || '/', 'http://localhost');
+    purge = u.searchParams.get('purgeIssues') === '1';
+  } catch {
+    purge = false;
+  }
+  if (purge && Array.isArray(db.issues)) {
+    db.issues = db.issues.filter((iss) => iss.deviceId !== deviceId);
+  }
+  await saveLicenseDbAsync(db);
+  console.log('Device deleted:', deviceId, 'purgeIssues=', purge);
+  sendJson(res, 200, { ok: true, deleted: deviceId, purgeIssues: purge });
+}
+
+/** Render/로컬 공통 HTTP 핸들러 */
+function handleRenderHttp(req, res) {
+  const urlPath = (req.url || '').split('?')[0];
+
+  if (req.method === 'GET' && (urlPath === '/' || urlPath === '/index.html')) {
     const html = renderHtmlDashboard();
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
     return;
   }
 
-  if (req.method === 'GET' && url === '/health') {
+  if (req.method === 'GET' && urlPath === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('ok');
     return;
   }
 
-  if (req.method === 'POST' && (url === '/issue' || url === '/license')) {
+  if (req.method === 'GET' && urlPath === '/api/devices') {
+    const db = loadLicenseDb();
+    const devices = Object.values(db.devices || {}).sort((a, b) =>
+      (a.firstSeenAt || '').localeCompare(b.firstSeenAt || '')
+    );
+    sendJson(res, 200, { storage: storageMode, devices, issueCount: (db.issues || []).length });
+    return;
+  }
+
+  const deviceMatch = urlPath.match(/^\/api\/devices\/([0-9a-fA-F]+)$/);
+  if (deviceMatch) {
+    const deviceId = normalizeDeviceIdParam(deviceMatch[1]);
+    if (!deviceId) {
+      sendJson(res, 400, { error: 'invalid deviceId' });
+      return;
+    }
+    if (req.method === 'PATCH' || req.method === 'PUT') {
+      handleApiDevicesUpdate(req, res, deviceId).catch((e) => {
+        console.error('PATCH device error:', e);
+        sendJson(res, 500, { error: String(e.message || e) });
+      });
+      return;
+    }
+    if (req.method === 'DELETE') {
+      handleApiDevicesDelete(req, res, deviceId).catch((e) => {
+        console.error('DELETE device error:', e);
+        sendJson(res, 500, { error: String(e.message || e) });
+      });
+      return;
+    }
+  }
+
+  if (req.method === 'POST' && (urlPath === '/issue' || urlPath === '/license')) {
     readHttpBody(req)
       .then((body) => {
         try {
@@ -411,7 +578,9 @@ function startListeners() {
     const port = Number(process.env.PORT) || 10000;
     const renderHttp = http.createServer(handleRenderHttp);
     renderHttp.listen(port, '0.0.0.0', () => {
-      console.log(`Render mode: HTTP 0.0.0.0:${port}  GET /  GET /health  POST /issue`);
+      console.log(
+        `Render mode: HTTP 0.0.0.0:${port}  GET /  GET /health  GET /api/devices  PATCH/DELETE /api/devices/:id  POST /issue`
+      );
     });
   } else {
     const tcpServer = net.createServer((socket) => {
@@ -452,66 +621,59 @@ function startListeners() {
     tcpServer.listen(TCP_PORT, TCP_HOST, () => {
       console.log(`License TCP server listening on ${TCP_HOST}:${TCP_PORT}`);
     });
-  }
 
-  if (!useUnifiedHttp) {
-    const httpServer = http.createServer((req, res) => {
-      if (req.url === '/' || req.url === '/index.html') {
-        const html = renderHtmlDashboard();
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(html);
-      } else {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Not Found');
-      }
-    });
-
+    const httpServer = http.createServer(handleRenderHttp);
     httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
-      console.log(`License HTTP dashboard listening on http://${HTTP_HOST}:${HTTP_PORT}/`);
+      console.log(
+        `License HTTP dashboard listening on http://${HTTP_HOST}:${HTTP_PORT}/  (edit: PATCH /api/devices/:id)`
+      );
     });
   }
 }
 
-// 간단한 HTML 대시보드 서버
+// HTML 대시보드 (웹에서 회사명/메모 편집 · 삭제)
 function renderHtmlDashboard() {
   const db = loadLicenseDb();
   const devices = Object.values(db.devices || {});
   const issues = db.issues || [];
+  const adminRequired = adminTokenExpected() ? '1' : '0';
 
-  // 회사별 집계
   const companyStats = {};
   for (const d of devices) {
     const company = d.company || 'Unknown';
-    if (!companyStats[company]) {
-      companyStats[company] = 0;
-    }
-    companyStats[company] += 1;
+    companyStats[company] = (companyStats[company] || 0) + 1;
   }
 
   const companyRows = Object.entries(companyStats)
     .sort((a, b) => b[1] - a[1])
     .map(
       ([company, count]) =>
-        `<tr><td>${company}</td><td style="text-align:right">${count}</td></tr>`
+        `<tr><td>${escHtml(company)}</td><td style="text-align:right">${count}</td></tr>`
     )
     .join('\n');
 
   const deviceRows = devices
     .sort((a, b) => (a.firstSeenAt || '').localeCompare(b.firstSeenAt || ''))
-    .map(
-      (d) => `
-        <tr>
-          <td><code>${d.deviceId}</code></td>
-          <td>${d.company || 'Unknown'}</td>
+    .map((d) => {
+      const id = escHtml(d.deviceId);
+      const company = escHtml(d.company || 'Unknown');
+      const note = escHtml(d.note || '');
+      return `
+        <tr data-id="${id}">
+          <td><code class="dev-id">${id}</code></td>
+          <td><input class="inp-company" type="text" value="${company}" maxlength="120" /></td>
+          <td><input class="inp-note" type="text" value="${note}" maxlength="500" placeholder="메모" /></td>
           <td style="text-align:right">${d.issueCount || 0}</td>
-          <td>${d.firstSeenAt || ''}</td>
-          <td>${d.lastSeenAt || ''}</td>
-        </tr>
-      `
-    )
+          <td class="muted">${escHtml(d.firstSeenAt || '')}</td>
+          <td class="muted">${escHtml(d.lastSeenAt || '')}</td>
+          <td class="actions">
+            <button type="button" class="btn-save">저장</button>
+            <button type="button" class="btn-del danger">삭제</button>
+          </td>
+        </tr>`;
+    })
     .join('\n');
 
-  // 회사별 발급 이력 그룹핑
   const issuesByCompany = {};
   for (const iss of issues) {
     const company = iss.company || 'Unknown';
@@ -528,27 +690,18 @@ function renderHtmlDashboard() {
         .map(
           (iss) => `
             <tr>
-              <td>${iss.issuedAt || ''}</td>
-              <td><code>${iss.deviceId}</code></td>
-            </tr>
-          `
+              <td>${escHtml(iss.issuedAt || '')}</td>
+              <td><code>${escHtml(iss.deviceId)}</code></td>
+            </tr>`
         )
         .join('\n');
 
       return `
-        <h3 id="company-${company}">${company}</h3>
+        <h3>${escHtml(company)}</h3>
         <table>
-          <thead>
-            <tr>
-              <th>발급 시간</th>
-              <th>Device ID</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows || '<tr><td colspan="2">발급 이력 없음</td></tr>'}
-          </tbody>
-        </table>
-      `;
+          <thead><tr><th>발급 시간</th><th>Device ID</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="2">발급 이력 없음</td></tr>'}</tbody>
+        </table>`;
     })
     .join('\n');
 
@@ -556,54 +709,151 @@ function renderHtmlDashboard() {
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Scream License Dashboard</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background: #f5f7fb; color: #222; }
-    h1 { margin-bottom: 8px; }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 24px; background: #fff; }
-    th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; }
-    th { background: #f0f2f7; text-align: left; }
-    code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
-    .section-title { margin-top: 24px; margin-bottom: 8px; }
+    :root { --bg:#f5f7fb; --card:#fff; --line:#dde3ee; --ink:#1a1f2e; --muted:#667085; --accent:#1d4ed8; --danger:#b91c1c; --ok:#15803d; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--ink); }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; }
+    h2 { margin: 28px 0 10px; font-size: 1.1rem; }
+    h3 { margin: 18px 0 8px; font-size: 1rem; }
+    .meta { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:end; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:18px; }
+    .toolbar label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+    .toolbar input { min-width:220px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:13px; }
+    .toolbar .hint { font-size:12px; color:var(--muted); flex:1; min-width:200px; }
+    #status { min-height:1.2em; font-size:13px; margin: 0 0 12px; }
+    #status.ok { color: var(--ok); }
+    #status.err { color: var(--danger); }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; background: var(--card); border-radius: 10px; overflow: hidden; }
+    th, td { border: 1px solid var(--line); padding: 8px; font-size: 13px; vertical-align: middle; }
+    th { background: #eef2f8; text-align: left; white-space: nowrap; }
+    code, .dev-id { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }
+    .muted { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    input.inp-company, input.inp-note { width: 100%; min-width: 100px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+    .actions { white-space: nowrap; }
+    button { cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+    button:hover { background: #f8fafc; }
+    button.btn-save { border-color: #93c5fd; color: var(--accent); font-weight: 600; }
+    button.danger { border-color: #fecaca; color: var(--danger); }
+    .hidden { display: none !important; }
   </style>
 </head>
-<body>
+<body data-admin-required="${adminRequired}">
   <h1>Scream License Dashboard</h1>
-  <p>총 디바이스 수: ${devices.length}</p>
-  <p>총 발급 이력 수: ${issues.length}</p>
+  <p class="meta">총 디바이스 ${devices.length} · 발급 이력 ${issues.length} · 저장: ${escHtml(storageMode)}</p>
 
-  <h2 class="section-title">회사별 디바이스 수</h2>
+  <div class="toolbar ${adminRequired === '1' ? '' : 'hidden'}" id="adminBar">
+    <label>관리 토큰 (LICENSE_ADMIN_TOKEN)
+      <input id="adminToken" type="password" autocomplete="off" placeholder="편집 시 필요" />
+    </label>
+    <p class="hint">Render Environment 에 설정한 토큰을 입력하면 회사명·메모 수정/삭제가 가능합니다. 브라우저에만 저장됩니다.</p>
+  </div>
+  <div id="status"></div>
+
+  <h2>회사별 디바이스 수</h2>
   <table>
-    <thead>
-      <tr><th>회사</th><th>디바이스 수</th></tr>
-    </thead>
-    <tbody>
-      ${companyRows || '<tr><td colspan="2">데이터 없음</td></tr>'}
-    </tbody>
+    <thead><tr><th>회사</th><th>디바이스 수</th></tr></thead>
+    <tbody>${companyRows || '<tr><td colspan="2">데이터 없음</td></tr>'}</tbody>
   </table>
 
-  <h2 class="section-title">디바이스별 라이센스 정보</h2>
+  <h2>디바이스별 라이선스 정보 (편집 가능)</h2>
   <table>
     <thead>
       <tr>
         <th>Device ID</th>
         <th>회사</th>
+        <th>메모</th>
         <th>발급 횟수</th>
-        <th>최초 발급 시간</th>
-        <th>마지막 발급 시간</th>
+        <th>최초 발급</th>
+        <th>마지막 발급</th>
+        <th>동작</th>
       </tr>
     </thead>
-    <tbody>
-      ${deviceRows || '<tr><td colspan="5">데이터 없음</td></tr>'}
+    <tbody id="deviceTable">
+      ${deviceRows || '<tr><td colspan="7">데이터 없음</td></tr>'}
     </tbody>
   </table>
 
-  <h2 class="section-title">회사별 발급 이력</h2>
-  ${companyIssueSections || '<p>발급 이력이 없습니다.</p>'}
+  <h2>회사별 발급 이력</h2>
+  ${companyIssueSections || '<p class="meta">발급 이력이 없습니다.</p>'}
 
-  <p style="font-size:12px;color:#666;">
-    회사명은 licenses.json 의 각 device 레코드의 <code>company</code> 필드를 수정해서 설정할 수 있습니다.
-  </p>
+  <p class="meta">회사명·메모는 「저장」으로 반영됩니다. 삭제 시 디바이스 목록에서만 제거되며, 발급 이력은 기본 유지됩니다.</p>
+
+  <script>
+    (function () {
+      const adminRequired = document.body.dataset.adminRequired === '1';
+      const tokenInput = document.getElementById('adminToken');
+      const statusEl = document.getElementById('status');
+      const KEY = 'scream_license_admin_token';
+
+      if (adminRequired && tokenInput) {
+        tokenInput.value = sessionStorage.getItem(KEY) || '';
+        tokenInput.addEventListener('change', function () {
+          sessionStorage.setItem(KEY, tokenInput.value || '');
+        });
+      }
+
+      function setStatus(msg, ok) {
+        statusEl.textContent = msg || '';
+        statusEl.className = ok === true ? 'ok' : ok === false ? 'err' : '';
+      }
+
+      function headers() {
+        const h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+        if (adminRequired && tokenInput && tokenInput.value) {
+          h['X-Admin-Token'] = tokenInput.value;
+        }
+        return h;
+      }
+
+      async function saveRow(tr) {
+        const id = tr.getAttribute('data-id');
+        const company = tr.querySelector('.inp-company').value.trim();
+        const note = tr.querySelector('.inp-note').value;
+        setStatus('저장 중…');
+        try {
+          const res = await fetch('/api/devices/' + encodeURIComponent(id), {
+            method: 'PATCH',
+            headers: headers(),
+            body: JSON.stringify({ company: company || 'Unknown', note: note }),
+          });
+          const data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setStatus('저장 완료: ' + id.slice(0, 8) + '…', true);
+          setTimeout(function () { location.reload(); }, 500);
+        } catch (e) {
+          setStatus('저장 실패: ' + e.message, false);
+        }
+      }
+
+      async function deleteRow(tr) {
+        const id = tr.getAttribute('data-id');
+        if (!confirm('이 디바이스 기록을 삭제할까요?\\n' + id)) return;
+        const purge = confirm('발급 이력까지 함께 삭제할까요?\\n(취소하면 디바이스 목록만 제거)');
+        setStatus('삭제 중…');
+        try {
+          const url = '/api/devices/' + encodeURIComponent(id) + (purge ? '?purgeIssues=1' : '');
+          const res = await fetch(url, { method: 'DELETE', headers: headers() });
+          const data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setStatus('삭제 완료', true);
+          setTimeout(function () { location.reload(); }, 400);
+        } catch (e) {
+          setStatus('삭제 실패: ' + e.message, false);
+        }
+      }
+
+      document.getElementById('deviceTable').addEventListener('click', function (ev) {
+        const t = ev.target;
+        const tr = t.closest('tr[data-id]');
+        if (!tr) return;
+        if (t.classList.contains('btn-save')) saveRow(tr);
+        if (t.classList.contains('btn-del')) deleteRow(tr);
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
