@@ -79,6 +79,14 @@
       "lastSeenAt": "2026-06-02T01:41:05.646Z",
       "issueCount": 1,
       "lastSignature": "62517df9e818e94e2dbb836ed7c5f66a4441dcf6d5c9bb4fc3eaa88432880e285cdf86d6918de48a31047ff382cc2bf5cc9d6ff281fe0ee23f364d838b2f544c"
+    },
+    "55524b59333030303600000000022d43": {
+      "deviceId": "55524b59333030303600000000022d43",
+      "company": "Unknown",
+      "firstSeenAt": "2026-07-15T01:32:55.148Z",
+      "lastSeenAt": "2026-07-15T01:32:55.148Z",
+      "issueCount": 1,
+      "lastSignature": "369b193b49f1b0eb24c567b380cf63e7b4d2d7bbf60f5957f380e36f8ce84ee66011817104a0e63bf2b1369a29a8a7acc4f33eddbea3bbb8d81a3a6d35e42ca2"
     }
   },
   "issues": [
@@ -156,6 +164,11 @@
       "deviceId": "55524b593232303038000000000b2a1f",
       "company": "비상벨",
       "issuedAt": "2026-06-02T01:41:05.646Z"
+    },
+    {
+      "deviceId": "55524b59333030303600000000022d43",
+      "company": "Unknown",
+      "issuedAt": "2026-07-15T01:32:55.148Z"
     }
   ]
 }
