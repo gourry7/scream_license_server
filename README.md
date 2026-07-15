@@ -53,14 +53,18 @@ npm start
 
 ### 통합 HTTP (Render / `LICENSE_HTTP_UNIFIED=1`)
 
-- `GET /` — 담당자용 HTML 대시보드  
-  - **한눈 보기:** KPI(디바이스/회사/발급/Unknown/재발급) · 회사 카드 · 최근 발급  
-  - **디바이스 관리:** 검색·회사 필터 · 회사명/메모 편집 · 삭제  
-  - **발급 이력:** 회사별 접이식 타임라인 (KST 표시)  
+- `GET /` — 담당자용 HTML 대시보드 (표시된 항목 모두 웹에서 수정 가능)  
+  - **한눈 보기:** KPI · 회사 카드 · 최근 발급  
+  - **회사 관리:** 회사명 일괄 변경 · 메모/연락처 · 회사 단위 삭제  
+  - **디바이스 관리:** 회사/메모/발급횟수/최초·최근 시각 편집 · 삭제  
+  - **발급 이력:** 시각·회사·Device ID 편집 · 삭제 (KST)  
 - `GET /health` — 헬스 체크 (Render용)  
 - `GET /api/devices` — 디바이스 목록 JSON  
-- `PATCH /api/devices/:deviceId` — 회사명·메모 수정 (`{"company":"...","note":"..."}`)  
-- `DELETE /api/devices/:deviceId` — 디바이스 기록 삭제 (`?purgeIssues=1` 이면 발급 이력도 삭제)  
+- `PATCH /api/devices/:deviceId` — 디바이스 필드 수정  
+- `DELETE /api/devices/:deviceId` — 디바이스 삭제 (`?purgeIssues=1` 이면 이력도 삭제)  
+- `PATCH /api/companies` — `{from,to,note,contact}` 회사명 일괄 변경  
+- `DELETE /api/companies` — `{name}` 회사 소속 디바이스·이력 삭제  
+- `PATCH /api/issues` / `DELETE /api/issues` — 발급 이력 1건 수정/삭제  
 - `POST /issue` — 본문 JSON `{"deviceId":"<hex>","company":"..."}` → **88바이트** `application/octet-stream`
 
 웹 편집을 잠그려면 Render Environment 에 `LICENSE_ADMIN_TOKEN` 을 넣고, 대시보드 상단에 같은 토큰을 입력합니다. (요청 헤더 `X-Admin-Token`)

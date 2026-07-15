@@ -101,10 +101,11 @@ async function githubLoadInitial() {
     const parsed = JSON.parse(raw);
     if (!parsed.devices) parsed.devices = {};
     if (!parsed.issues) parsed.issues = [];
+    if (!parsed.companies) parsed.companies = {};
     githubDbCache = parsed;
   } catch (e) {
     if (e.status === 404) {
-      githubDbCache = { devices: {}, issues: [] };
+      githubDbCache = { devices: {}, issues: [], companies: {} };
       githubFileSha = null;
       await githubPersistNow();
     } else {
@@ -161,9 +162,10 @@ function loadLicenseDbFromFile() {
     const parsed = JSON.parse(buf);
     if (!parsed.devices) parsed.devices = {};
     if (!parsed.issues) parsed.issues = [];
+    if (!parsed.companies) parsed.companies = {};
     return parsed;
   } catch (e) {
-    return { devices: {}, issues: [] };
+    return { devices: {}, issues: [], companies: {} };
   }
 }
 
@@ -302,7 +304,7 @@ async function initLicenseStorage() {
     `);
     const r = await pgPool.query('SELECT data FROM license_state WHERE id = 1');
     if (r.rows.length === 0) {
-      pgDbCache = { devices: {}, issues: [] };
+      pgDbCache = { devices: {}, issues: [], companies: {} };
       await pgPool.query('INSERT INTO license_state (id, data) VALUES (1, $1::jsonb)', [
         JSON.stringify(pgDbCache),
       ]);
@@ -313,6 +315,7 @@ async function initLicenseStorage() {
       }
       if (!row.devices) row.devices = {};
       if (!row.issues) row.issues = [];
+      if (!row.companies) row.companies = {};
       pgDbCache = row;
     }
     storageMode = 'postgres';
@@ -415,17 +418,78 @@ function readHttpBody(req) {
   });
 }
 
+function normalizeCompanyName(name) {
+  const s = String(name == null ? '' : name).trim();
+  return s || 'Unknown';
+}
+
+/** ISO / 'YYYY-MM-DD HH:mm'(KST) / Date 문자열 → ISO */
+function parseFlexibleDate(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const t = String(value).trim();
+  let d;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(t)) {
+    d = new Date(t);
+  } else if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(t)) {
+    const norm = t.replace(' ', 'T');
+    const withSec = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(norm) ? `${norm}:00` : norm;
+    d = new Date(`${withSec}+09:00`);
+  } else {
+    d = new Date(t);
+  }
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+function formatInputKst(iso) {
+  if (!iso) return '';
+  const formatted = formatKst(iso);
+  // formatKst: "2026. 04. 02. 14:25" or similar — rebuild YYYY-MM-DD HH:mm
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Seoul',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const get = (type) => {
+      const p = parts.find((x) => x.type === type);
+      return p ? p.value : '';
+    };
+    let hour = get('hour');
+    if (hour === '24') hour = '00';
+    return `${get('year')}-${get('month')}-${get('day')} ${hour}:${get('minute')}`;
+  } catch (_) {
+    return formatted;
+  }
+}
+
+async function readJsonBody(req) {
+  const body = await readHttpBody(req);
+  try {
+    return JSON.parse(body.toString('utf8') || '{}');
+  } catch {
+    const err = new Error('invalid JSON');
+    err.status = 400;
+    throw err;
+  }
+}
+
 async function handleApiDevicesUpdate(req, res, deviceId) {
   if (!checkAdminAuth(req)) {
     sendJson(res, 401, { error: 'unauthorized' });
     return;
   }
-  const body = await readHttpBody(req);
   let payload;
   try {
-    payload = JSON.parse(body.toString('utf8') || '{}');
-  } catch {
-    sendJson(res, 400, { error: 'invalid JSON' });
+    payload = await readJsonBody(req);
+  } catch (e) {
+    sendJson(res, 400, { error: String(e.message || e) });
     return;
   }
 
@@ -438,9 +502,8 @@ async function handleApiDevicesUpdate(req, res, deviceId) {
   }
 
   if (payload.company !== undefined) {
-    const company = String(payload.company || '').trim() || 'Unknown';
+    const company = normalizeCompanyName(payload.company);
     rec.company = company;
-    // 같은 deviceId 발급 이력의 company 도 맞춤
     if (Array.isArray(db.issues)) {
       for (const iss of db.issues) {
         if (iss.deviceId === deviceId) iss.company = company;
@@ -449,6 +512,30 @@ async function handleApiDevicesUpdate(req, res, deviceId) {
   }
   if (payload.note !== undefined) {
     rec.note = String(payload.note || '').slice(0, 500);
+  }
+  if (payload.issueCount !== undefined) {
+    const n = Number(payload.issueCount);
+    if (!Number.isFinite(n) || n < 0) {
+      sendJson(res, 400, { error: 'invalid issueCount' });
+      return;
+    }
+    rec.issueCount = Math.floor(n);
+  }
+  if (payload.firstSeenAt !== undefined) {
+    const iso = parseFlexibleDate(payload.firstSeenAt);
+    if (payload.firstSeenAt && !iso) {
+      sendJson(res, 400, { error: 'invalid firstSeenAt' });
+      return;
+    }
+    rec.firstSeenAt = iso || '';
+  }
+  if (payload.lastSeenAt !== undefined) {
+    const iso = parseFlexibleDate(payload.lastSeenAt);
+    if (payload.lastSeenAt && !iso) {
+      sendJson(res, 400, { error: 'invalid lastSeenAt' });
+      return;
+    }
+    rec.lastSeenAt = iso || '';
   }
   rec.updatedAt = new Date().toISOString();
   db.devices[deviceId] = rec;
@@ -469,7 +556,6 @@ async function handleApiDevicesDelete(req, res, deviceId) {
     return;
   }
   delete db.devices[deviceId];
-  // 이력은 남겨 두되, 쿼리 ?purgeIssues=1 이면 함께 삭제
   let purge = false;
   try {
     const u = new URL(req.url || '/', 'http://localhost');
@@ -483,6 +569,198 @@ async function handleApiDevicesDelete(req, res, deviceId) {
   await saveLicenseDbAsync(db);
   console.log('Device deleted:', deviceId, 'purgeIssues=', purge);
   sendJson(res, 200, { ok: true, deleted: deviceId, purgeIssues: purge });
+}
+
+/** 회사명 일괄 변경 + 회사 메모 저장 */
+async function handleApiCompaniesUpdate(req, res) {
+  if (!checkAdminAuth(req)) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (e) {
+    sendJson(res, 400, { error: String(e.message || e) });
+    return;
+  }
+
+  const from = normalizeCompanyName(payload.from);
+  const to = payload.to !== undefined ? normalizeCompanyName(payload.to) : from;
+  const db = loadLicenseDb();
+  if (!db.devices) db.devices = {};
+  if (!db.issues) db.issues = [];
+  if (!db.companies) db.companies = {};
+
+  let deviceHits = 0;
+  let issueHits = 0;
+  for (const id of Object.keys(db.devices)) {
+    const rec = db.devices[id];
+    if (normalizeCompanyName(rec.company) === from) {
+      rec.company = to;
+      rec.updatedAt = new Date().toISOString();
+      deviceHits += 1;
+    }
+  }
+  for (const iss of db.issues) {
+    if (normalizeCompanyName(iss.company) === from) {
+      iss.company = to;
+      issueHits += 1;
+    }
+  }
+
+  const meta = db.companies[from] || db.companies[to] || {};
+  if (from !== to && db.companies[from]) {
+    delete db.companies[from];
+  }
+  db.companies[to] = {
+    name: to,
+    note: payload.note !== undefined ? String(payload.note || '').slice(0, 500) : meta.note || '',
+    contact:
+      payload.contact !== undefined
+        ? String(payload.contact || '').slice(0, 200)
+        : meta.contact || '',
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (deviceHits === 0 && issueHits === 0 && payload.note === undefined && payload.contact === undefined) {
+    sendJson(res, 404, { error: 'company not found', from });
+    return;
+  }
+
+  await saveLicenseDbAsync(db);
+  console.log('Company updated:', from, '->', to, 'devices=', deviceHits, 'issues=', issueHits);
+  sendJson(res, 200, {
+    ok: true,
+    from,
+    to,
+    deviceHits,
+    issueHits,
+    company: db.companies[to],
+  });
+}
+
+/** 회사 소속 디바이스/이력 일괄 삭제 */
+async function handleApiCompaniesDelete(req, res) {
+  if (!checkAdminAuth(req)) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (e) {
+    sendJson(res, 400, { error: String(e.message || e) });
+    return;
+  }
+  const name = normalizeCompanyName(payload.name || payload.company);
+  const purgeDevices = payload.purgeDevices !== false;
+  const purgeIssues = payload.purgeIssues !== false;
+  const db = loadLicenseDb();
+  if (!db.devices) db.devices = {};
+  if (!db.issues) db.issues = [];
+  if (!db.companies) db.companies = {};
+
+  let deletedDevices = 0;
+  if (purgeDevices) {
+    for (const id of Object.keys(db.devices)) {
+      if (normalizeCompanyName(db.devices[id].company) === name) {
+        delete db.devices[id];
+        deletedDevices += 1;
+      }
+    }
+  }
+  let deletedIssues = 0;
+  if (purgeIssues) {
+    const before = db.issues.length;
+    db.issues = db.issues.filter((iss) => normalizeCompanyName(iss.company) !== name);
+    deletedIssues = before - db.issues.length;
+  }
+  if (db.companies[name]) delete db.companies[name];
+
+  await saveLicenseDbAsync(db);
+  console.log('Company deleted:', name, 'devices=', deletedDevices, 'issues=', deletedIssues);
+  sendJson(res, 200, { ok: true, name, deletedDevices, deletedIssues });
+}
+
+function findIssueIndex(db, match) {
+  if (!match || !Array.isArray(db.issues)) return -1;
+  const deviceId = String(match.deviceId || '').toLowerCase();
+  const issuedAt = String(match.issuedAt || '');
+  return db.issues.findIndex(
+    (iss) => String(iss.deviceId || '').toLowerCase() === deviceId && String(iss.issuedAt || '') === issuedAt
+  );
+}
+
+/** 발급 이력 1건 수정 */
+async function handleApiIssuesUpdate(req, res) {
+  if (!checkAdminAuth(req)) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (e) {
+    sendJson(res, 400, { error: String(e.message || e) });
+    return;
+  }
+  const db = loadLicenseDb();
+  if (!db.issues) db.issues = [];
+  const idx = findIssueIndex(db, payload.match || payload);
+  if (idx < 0) {
+    sendJson(res, 404, { error: 'issue not found' });
+    return;
+  }
+  const iss = db.issues[idx];
+  if (payload.company !== undefined) {
+    iss.company = normalizeCompanyName(payload.company);
+  }
+  if (payload.issuedAt !== undefined) {
+    const iso = parseFlexibleDate(payload.issuedAt);
+    if (!iso) {
+      sendJson(res, 400, { error: 'invalid issuedAt' });
+      return;
+    }
+    iss.issuedAt = iso;
+  }
+  if (payload.deviceId !== undefined) {
+    const id = normalizeDeviceIdParam(payload.deviceId);
+    if (!id) {
+      sendJson(res, 400, { error: 'invalid deviceId' });
+      return;
+    }
+    iss.deviceId = id;
+  }
+  db.issues[idx] = iss;
+  await saveLicenseDbAsync(db);
+  console.log('Issue updated:', iss.deviceId, iss.issuedAt);
+  sendJson(res, 200, { ok: true, issue: iss });
+}
+
+async function handleApiIssuesDelete(req, res) {
+  if (!checkAdminAuth(req)) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch (e) {
+    sendJson(res, 400, { error: String(e.message || e) });
+    return;
+  }
+  const db = loadLicenseDb();
+  if (!db.issues) db.issues = [];
+  const idx = findIssueIndex(db, payload.match || payload);
+  if (idx < 0) {
+    sendJson(res, 404, { error: 'issue not found' });
+    return;
+  }
+  const removed = db.issues.splice(idx, 1)[0];
+  await saveLicenseDbAsync(db);
+  console.log('Issue deleted:', removed.deviceId, removed.issuedAt);
+  sendJson(res, 200, { ok: true, deleted: removed });
 }
 
 /** Render/로컬 공통 HTTP 핸들러 */
@@ -528,6 +806,40 @@ function handleRenderHttp(req, res) {
     if (req.method === 'DELETE') {
       handleApiDevicesDelete(req, res, deviceId).catch((e) => {
         console.error('DELETE device error:', e);
+        sendJson(res, 500, { error: String(e.message || e) });
+      });
+      return;
+    }
+  }
+
+  if (urlPath === '/api/companies') {
+    if (req.method === 'PATCH' || req.method === 'PUT') {
+      handleApiCompaniesUpdate(req, res).catch((e) => {
+        console.error('PATCH company error:', e);
+        sendJson(res, 500, { error: String(e.message || e) });
+      });
+      return;
+    }
+    if (req.method === 'DELETE') {
+      handleApiCompaniesDelete(req, res).catch((e) => {
+        console.error('DELETE company error:', e);
+        sendJson(res, 500, { error: String(e.message || e) });
+      });
+      return;
+    }
+  }
+
+  if (urlPath === '/api/issues') {
+    if (req.method === 'PATCH' || req.method === 'PUT') {
+      handleApiIssuesUpdate(req, res).catch((e) => {
+        console.error('PATCH issue error:', e);
+        sendJson(res, 500, { error: String(e.message || e) });
+      });
+      return;
+    }
+    if (req.method === 'DELETE') {
+      handleApiIssuesDelete(req, res).catch((e) => {
+        console.error('DELETE issue error:', e);
         sendJson(res, 500, { error: String(e.message || e) });
       });
       return;
@@ -671,13 +983,22 @@ function renderHtmlDashboard() {
   const adminRequired = adminTokenExpected() ? '1' : '0';
   const nowIso = new Date().toISOString();
 
+  const companyMeta = db.companies || {};
   const companyMap = {};
   let unknownCount = 0;
   let reissueCount = 0;
   for (const d of devices) {
-    const company = (d.company || 'Unknown').trim() || 'Unknown';
+    const company = normalizeCompanyName(d.company);
     if (!companyMap[company]) {
-      companyMap[company] = { company, devices: 0, issues: 0, lastSeenAt: '' };
+      const meta = companyMeta[company] || {};
+      companyMap[company] = {
+        company,
+        devices: 0,
+        issues: 0,
+        lastSeenAt: '',
+        note: meta.note || '',
+        contact: meta.contact || '',
+      };
     }
     companyMap[company].devices += 1;
     if (!companyMap[company].lastSeenAt || (d.lastSeenAt || '') > companyMap[company].lastSeenAt) {
@@ -687,11 +1008,34 @@ function renderHtmlDashboard() {
     if ((d.issueCount || 0) > 1) reissueCount += 1;
   }
   for (const iss of issues) {
-    const company = (iss.company || 'Unknown').trim() || 'Unknown';
+    const company = normalizeCompanyName(iss.company);
     if (!companyMap[company]) {
-      companyMap[company] = { company, devices: 0, issues: 0, lastSeenAt: '' };
+      const meta = companyMeta[company] || {};
+      companyMap[company] = {
+        company,
+        devices: 0,
+        issues: 0,
+        lastSeenAt: '',
+        note: meta.note || '',
+        contact: meta.contact || '',
+      };
     }
     companyMap[company].issues += 1;
+  }
+  // 메타만 있고 디바이스/이력이 없는 회사도 표시
+  for (const name of Object.keys(companyMeta)) {
+    const company = normalizeCompanyName(name);
+    if (!companyMap[company]) {
+      const meta = companyMeta[name] || {};
+      companyMap[company] = {
+        company,
+        devices: 0,
+        issues: 0,
+        lastSeenAt: '',
+        note: meta.note || '',
+        contact: meta.contact || '',
+      };
+    }
   }
 
   const companies = Object.values(companyMap).sort((a, b) => b.devices - a.devices);
@@ -721,7 +1065,25 @@ function renderHtmlDashboard() {
         <div class="co-name">${escHtml(c.company)}</div>
         <div class="co-nums"><b>${c.devices}</b>대 · 발급 ${c.issues}회</div>
         <div class="co-sub">최근 ${escHtml(formatKst(c.lastSeenAt))}</div>
+        ${c.note ? `<div class="co-sub">${escHtml(c.note)}</div>` : ''}
       </article>`;
+    })
+    .join('');
+
+  const companyRows = companies
+    .map((c) => {
+      return `<tr class="co-row" data-from="${escHtml(c.company)}">
+        <td><input class="inp-co-name" type="text" value="${escHtml(c.company)}" maxlength="120" /></td>
+        <td><input class="inp-co-note" type="text" value="${escHtml(c.note || '')}" maxlength="500" placeholder="회사 메모" /></td>
+        <td><input class="inp-co-contact" type="text" value="${escHtml(c.contact || '')}" maxlength="200" placeholder="담당/연락처" /></td>
+        <td class="num">${c.devices}</td>
+        <td class="num">${c.issues}</td>
+        <td class="muted">${escHtml(formatKst(c.lastSeenAt))}</td>
+        <td class="actions">
+          <button type="button" class="btn-co-save">저장</button>
+          <button type="button" class="btn-co-del danger">삭제</button>
+        </td>
+      </tr>`;
     })
     .join('');
 
@@ -730,7 +1092,7 @@ function renderHtmlDashboard() {
     .sort((a, b) => (b.lastSeenAt || '').localeCompare(a.lastSeenAt || ''))
     .map((d) => {
       const id = d.deviceId || '';
-      const company = (d.company || 'Unknown').trim() || 'Unknown';
+      const company = normalizeCompanyName(d.company);
       const note = d.note || '';
       const unknown = company === 'Unknown' ? '1' : '0';
       const searchBlob = escHtml(
@@ -748,9 +1110,9 @@ function renderHtmlDashboard() {
         </td>
         <td><input class="inp-company" type="text" value="${escHtml(company)}" maxlength="120" /></td>
         <td><input class="inp-note" type="text" value="${escHtml(note)}" maxlength="500" placeholder="설치 위치·담당자 등" /></td>
-        <td class="num">${d.issueCount || 0}</td>
-        <td class="muted">${escHtml(formatKst(d.firstSeenAt))}</td>
-        <td class="muted">${escHtml(formatKst(d.lastSeenAt))}</td>
+        <td><input class="inp-count num" type="number" min="0" step="1" value="${Number(d.issueCount || 0)}" /></td>
+        <td><input class="inp-first" type="text" value="${escHtml(formatInputKst(d.firstSeenAt))}" placeholder="YYYY-MM-DD HH:mm" /></td>
+        <td><input class="inp-last" type="text" value="${escHtml(formatInputKst(d.lastSeenAt))}" placeholder="YYYY-MM-DD HH:mm" /></td>
         <td class="actions">
           <button type="button" class="btn-save">저장</button>
           <button type="button" class="btn-del danger">삭제</button>
@@ -772,21 +1134,30 @@ function renderHtmlDashboard() {
   const historySections = companies
     .map((c) => {
       const companyIssues = issues
-        .filter((iss) => ((iss.company || 'Unknown').trim() || 'Unknown') === c.company)
+        .filter((iss) => normalizeCompanyName(iss.company) === c.company)
         .sort((a, b) => (b.issuedAt || '').localeCompare(a.issuedAt || ''));
       const rows = companyIssues
-        .map(
-          (iss) => `<tr>
-            <td>${escHtml(formatKst(iss.issuedAt))}</td>
-            <td><code>${escHtml(iss.deviceId)}</code></td>
-          </tr>`
-        )
+        .map((iss) => {
+          const matchId = escHtml(iss.deviceId || '');
+          const matchAt = escHtml(iss.issuedAt || '');
+          return `<tr class="iss-row" data-device="${matchId}" data-issued="${matchAt}">
+            <td><input class="inp-iss-at" type="text" value="${escHtml(formatInputKst(iss.issuedAt))}" placeholder="YYYY-MM-DD HH:mm" /></td>
+            <td><input class="inp-iss-company" type="text" value="${escHtml(
+              normalizeCompanyName(iss.company)
+            )}" maxlength="120" /></td>
+            <td><input class="inp-iss-device" type="text" value="${matchId}" maxlength="32" /></td>
+            <td class="actions">
+              <button type="button" class="btn-iss-save">저장</button>
+              <button type="button" class="btn-iss-del danger">삭제</button>
+            </td>
+          </tr>`;
+        })
         .join('');
       return `<details class="hist-block" data-company="${escHtml(c.company)}" open>
         <summary><strong>${escHtml(c.company)}</strong> <span class="muted">${companyIssues.length}건 / 디바이스 ${c.devices}대</span></summary>
         <table>
-          <thead><tr><th>발급 시각 (KST)</th><th>Device ID</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="2">이력 없음</td></tr>'}</tbody>
+          <thead><tr><th>발급 시각 (KST)</th><th>회사</th><th>Device ID</th><th>동작</th></tr></thead>
+          <tbody class="issueTable">${rows || '<tr><td colspan="4">이력 없음</td></tr>'}</tbody>
         </table>
       </details>`;
     })
@@ -891,10 +1262,12 @@ function renderHtmlDashboard() {
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
     .id-wrap { display:flex; gap:6px; align-items:center; }
     .id-full { margin-top: 3px; word-break: break-all; }
-    input.inp-company, input.inp-note {
+    input.inp-company, input.inp-note, input.inp-co-name, input.inp-co-note, input.inp-co-contact,
+    input.inp-first, input.inp-last, input.inp-iss-at, input.inp-iss-company, input.inp-iss-device, input.inp-count {
       width: 100%; min-width: 90px; border: 1px solid var(--line); border-radius: 8px;
       padding: 7px 8px; font-size: 13px; background: #fff;
     }
+    input.inp-count { min-width: 64px; max-width: 88px; }
     .actions { white-space: nowrap; }
     button {
       cursor: pointer; border: 1px solid var(--line); background: #fff;
@@ -949,6 +1322,7 @@ function renderHtmlDashboard() {
 
     <nav class="nav" id="mainNav">
       <button type="button" class="active" data-tab="overview">한눈 보기</button>
+      <button type="button" data-tab="companies">회사 관리</button>
       <button type="button" data-tab="devices">디바이스 관리</button>
       <button type="button" data-tab="history">발급 이력</button>
     </nav>
@@ -966,20 +1340,48 @@ function renderHtmlDashboard() {
         <div class="panel">
           <div class="panel-head">
             <h2>회사별 요약</h2>
-            <span class="muted">카드 클릭 → 디바이스 필터</span>
+            <span class="muted">카드 클릭 → 디바이스 필터 · 「회사 관리」에서 수정</span>
           </div>
           <div class="co-grid">${companyCards || '<div class="empty">등록된 회사가 없습니다.</div>'}</div>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2>최근 발급</h2><span class="muted">최신 8건</span></div>
+          <div class="panel-head"><h2>최근 발급</h2><span class="muted">최신 8건 · 전체 수정은「발급 이력」</span></div>
           <div class="table-scroll" style="max-height:420px">
             <table>
               <thead><tr><th>시각</th><th>회사</th><th>Device</th></tr></thead>
               <tbody>${recentRows || '<tr><td colspan="3" class="empty">발급 이력 없음</td></tr>'}</tbody>
             </table>
           </div>
-          <p class="footnote">시간이 Asia/Seoul(KST)로 표시됩니다. Unknown 회사는 위에서 바로 정리하세요.</p>
+          <p class="footnote">시각은 Asia/Seoul(KST). 회사명 오타·미지정은 「회사 관리」에서 일괄 수정하세요.</p>
         </div>
+      </div>
+    </section>
+
+    <section id="tab-companies" class="tab hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>회사 관리</h2>
+          <span class="muted">회사명 변경 시 소속 디바이스·발급 이력에 모두 반영</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>회사명</th>
+                <th>메모</th>
+                <th>담당/연락처</th>
+                <th>디바이스</th>
+                <th>발급</th>
+                <th>최근</th>
+                <th>동작</th>
+              </tr>
+            </thead>
+            <tbody id="companyTable">
+              ${companyRows || '<tr><td colspan="7" class="empty">회사 없음</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <p class="footnote">저장 = 회사명/메모/연락처 갱신(이름 변경 시 일괄 교체). 삭제 = 해당 회사 디바이스·발급 이력까지 제거(확인).</p>
       </div>
     </section>
 
@@ -1012,9 +1414,9 @@ function renderHtmlDashboard() {
                 <th>Device ID</th>
                 <th>회사</th>
                 <th>메모</th>
-                <th>발급</th>
-                <th>최초</th>
-                <th>최근</th>
+                <th>발급횟수</th>
+                <th>최초 (KST)</th>
+                <th>최근 (KST)</th>
                 <th>동작</th>
               </tr>
             </thead>
@@ -1023,20 +1425,21 @@ function renderHtmlDashboard() {
             </tbody>
           </table>
         </div>
-        <p class="footnote">회사명·메모 수정 후 저장하세요. 삭제는 목록에서 제거하며, 확인 시 발급 이력까지 지울 수 있습니다.</p>
+        <p class="footnote">모든 칸 수정 후 저장. 시각 형식: YYYY-MM-DD HH:mm (한국시간). 삭제는 확인 시 발급 이력까지 지울 수 있습니다.</p>
       </div>
     </section>
 
     <section id="tab-history" class="tab hidden">
       <div class="panel">
         <div class="panel-head">
-          <h2>회사별 발급 이력</h2>
+          <h2>발급 이력 (수정 가능)</h2>
           <div style="display:flex;gap:6px;">
             <button type="button" id="expandAll">모두 펼치기</button>
             <button type="button" id="collapseAll">모두 접기</button>
           </div>
         </div>
         ${historySections || '<div class="empty">발급 이력이 없습니다.</div>'}
+        <p class="footnote">각 행의 시각·회사·Device ID를 고친 뒤 저장하세요.</p>
       </div>
     </section>
   </div>
@@ -1071,7 +1474,7 @@ function renderHtmlDashboard() {
       }
 
       function showTab(name) {
-        ['overview', 'devices', 'history'].forEach(function (t) {
+        ['overview', 'companies', 'devices', 'history'].forEach(function (t) {
           var el = document.getElementById('tab-' + t);
           if (el) el.classList.toggle('hidden', t !== name);
         });
@@ -1136,20 +1539,77 @@ function renderHtmlDashboard() {
         document.querySelectorAll('.hist-block').forEach(function (d) { d.open = false; });
       });
 
+      async function saveCompany(tr) {
+        var from = tr.getAttribute('data-from');
+        var to = tr.querySelector('.inp-co-name').value.trim() || 'Unknown';
+        var note = tr.querySelector('.inp-co-note').value;
+        var contact = tr.querySelector('.inp-co-contact').value;
+        setStatus('회사 저장 중…');
+        try {
+          var res = await fetch('/api/companies', {
+            method: 'PATCH',
+            headers: headers(),
+            body: JSON.stringify({ from: from, to: to, note: note, contact: contact }),
+          });
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setStatus('회사 저장 완료 (' + (data.deviceHits || 0) + '대, 이력 ' + (data.issueHits || 0) + '건)', true);
+          setTimeout(function () { location.reload(); }, 450);
+        } catch (e) {
+          setStatus('회사 저장 실패: ' + e.message, false);
+        }
+      }
+
+      async function deleteCompany(tr) {
+        var name = tr.getAttribute('data-from');
+        if (!confirm('회사 “‘ + name + '” 를 삭제할까요?\\n소속 디바이스와 발급 이력이 함께 삭제됩니다.')) return;
+        setStatus('회사 삭제 중…');
+        try {
+          var res = await fetch('/api/companies', {
+            method: 'DELETE',
+            headers: headers(),
+            body: JSON.stringify({ name: name, purgeDevices: true, purgeIssues: true }),
+          });
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setStatus('회사 삭제 완료', true);
+          setTimeout(function () { location.reload(); }, 400);
+        } catch (e) {
+          setStatus('회사 삭제 실패: ' + e.message, false);
+        }
+      }
+
+      document.getElementById('companyTable').addEventListener('click', function (ev) {
+        var t = ev.target;
+        var tr = t.closest('tr.co-row');
+        if (!tr) return;
+        if (t.classList.contains('btn-co-save')) saveCompany(tr);
+        if (t.classList.contains('btn-co-del')) deleteCompany(tr);
+      });
+
       async function saveRow(tr) {
         var id = tr.getAttribute('data-id');
         var company = tr.querySelector('.inp-company').value.trim();
         var note = tr.querySelector('.inp-note').value;
+        var issueCount = tr.querySelector('.inp-count').value;
+        var firstSeenAt = tr.querySelector('.inp-first').value;
+        var lastSeenAt = tr.querySelector('.inp-last').value;
         setStatus('저장 중…');
         try {
           var res = await fetch('/api/devices/' + encodeURIComponent(id), {
             method: 'PATCH',
             headers: headers(),
-            body: JSON.stringify({ company: company || 'Unknown', note: note }),
+            body: JSON.stringify({
+              company: company || 'Unknown',
+              note: note,
+              issueCount: issueCount,
+              firstSeenAt: firstSeenAt,
+              lastSeenAt: lastSeenAt,
+            }),
           });
           var data = await res.json().catch(function () { return {}; });
           if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-          setStatus('저장 완료', true);
+          setStatus('디바이스 저장 완료', true);
           setTimeout(function () { location.reload(); }, 450);
         } catch (e) {
           setStatus('저장 실패: ' + e.message, false);
@@ -1188,6 +1648,63 @@ function renderHtmlDashboard() {
         if (!tr) return;
         if (t.classList.contains('btn-save')) saveRow(tr);
         if (t.classList.contains('btn-del')) deleteRow(tr);
+      });
+
+      async function saveIssue(tr) {
+        var matchDevice = tr.getAttribute('data-device');
+        var matchIssued = tr.getAttribute('data-issued');
+        var issuedAt = tr.querySelector('.inp-iss-at').value;
+        var company = tr.querySelector('.inp-iss-company').value.trim();
+        var deviceId = tr.querySelector('.inp-iss-device').value.trim();
+        setStatus('이력 저장 중…');
+        try {
+          var res = await fetch('/api/issues', {
+            method: 'PATCH',
+            headers: headers(),
+            body: JSON.stringify({
+              match: { deviceId: matchDevice, issuedAt: matchIssued },
+              issuedAt: issuedAt,
+              company: company || 'Unknown',
+              deviceId: deviceId,
+            }),
+          });
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setStatus('이력 저장 완료', true);
+          setTimeout(function () { location.reload(); }, 450);
+        } catch (e) {
+          setStatus('이력 저장 실패: ' + e.message, false);
+        }
+      }
+
+      async function deleteIssue(tr) {
+        var matchDevice = tr.getAttribute('data-device');
+        var matchIssued = tr.getAttribute('data-issued');
+        if (!confirm('이 발급 이력을 삭제할까요?')) return;
+        setStatus('이력 삭제 중…');
+        try {
+          var res = await fetch('/api/issues', {
+            method: 'DELETE',
+            headers: headers(),
+            body: JSON.stringify({ match: { deviceId: matchDevice, issuedAt: matchIssued } }),
+          });
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          setStatus('이력 삭제 완료', true);
+          setTimeout(function () { location.reload(); }, 400);
+        } catch (e) {
+          setStatus('이력 삭제 실패: ' + e.message, false);
+        }
+      }
+
+      document.querySelectorAll('.issueTable').forEach(function (tbody) {
+        tbody.addEventListener('click', function (ev) {
+          var t = ev.target;
+          var tr = t.closest('tr.iss-row');
+          if (!tr) return;
+          if (t.classList.contains('btn-iss-save')) saveIssue(tr);
+          if (t.classList.contains('btn-iss-del')) deleteIssue(tr);
+        });
       });
 
       applyFilter();
