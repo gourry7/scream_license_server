@@ -631,162 +631,426 @@ function startListeners() {
   }
 }
 
-// HTML 대시보드 (웹에서 회사명/메모 편집 · 삭제)
+function formatKst(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  try {
+    return new Intl.DateTimeFormat('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(d);
+  } catch (_) {
+    return d.toISOString().replace('T', ' ').slice(0, 16);
+  }
+}
+
+function shortId(hex) {
+  const s = String(hex || '');
+  if (s.length <= 12) return s;
+  return s.slice(0, 6) + '…' + s.slice(-6);
+}
+
+function daysAgoIso(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.floor((Date.now() - t) / 86400000);
+}
+
+// HTML 대시보드 — 담당자 한눈 요약 + 검색/필터 + 편집
 function renderHtmlDashboard() {
   const db = loadLicenseDb();
   const devices = Object.values(db.devices || {});
   const issues = db.issues || [];
   const adminRequired = adminTokenExpected() ? '1' : '0';
+  const nowIso = new Date().toISOString();
 
-  const companyStats = {};
+  const companyMap = {};
+  let unknownCount = 0;
+  let reissueCount = 0;
   for (const d of devices) {
-    const company = d.company || 'Unknown';
-    companyStats[company] = (companyStats[company] || 0) + 1;
+    const company = (d.company || 'Unknown').trim() || 'Unknown';
+    if (!companyMap[company]) {
+      companyMap[company] = { company, devices: 0, issues: 0, lastSeenAt: '' };
+    }
+    companyMap[company].devices += 1;
+    if (!companyMap[company].lastSeenAt || (d.lastSeenAt || '') > companyMap[company].lastSeenAt) {
+      companyMap[company].lastSeenAt = d.lastSeenAt || '';
+    }
+    if (company === 'Unknown') unknownCount += 1;
+    if ((d.issueCount || 0) > 1) reissueCount += 1;
+  }
+  for (const iss of issues) {
+    const company = (iss.company || 'Unknown').trim() || 'Unknown';
+    if (!companyMap[company]) {
+      companyMap[company] = { company, devices: 0, issues: 0, lastSeenAt: '' };
+    }
+    companyMap[company].issues += 1;
   }
 
-  const companyRows = Object.entries(companyStats)
-    .sort((a, b) => b[1] - a[1])
+  const companies = Object.values(companyMap).sort((a, b) => b.devices - a.devices);
+  const recentIssues = issues
+    .slice()
+    .sort((a, b) => (b.issuedAt || '').localeCompare(a.issuedAt || ''))
+    .slice(0, 8);
+  const recent7d = issues.filter((iss) => {
+    const days = daysAgoIso(iss.issuedAt);
+    return days != null && days <= 7;
+  }).length;
+  const lastIssueAt = recentIssues[0] ? recentIssues[0].issuedAt : '';
+
+  const companyChips = companies
     .map(
-      ([company, count]) =>
-        `<tr><td>${escHtml(company)}</td><td style="text-align:right">${count}</td></tr>`
+      (c) =>
+        `<button type="button" class="chip" data-filter-company="${escHtml(c.company)}">${escHtml(
+          c.company
+        )} <span>${c.devices}</span></button>`
     )
-    .join('\n');
+    .join('');
+
+  const companyCards = companies
+    .map((c) => {
+      const warn = c.company === 'Unknown' ? ' warn' : '';
+      return `<article class="co-card${warn}" data-company="${escHtml(c.company)}">
+        <div class="co-name">${escHtml(c.company)}</div>
+        <div class="co-nums"><b>${c.devices}</b>대 · 발급 ${c.issues}회</div>
+        <div class="co-sub">최근 ${escHtml(formatKst(c.lastSeenAt))}</div>
+      </article>`;
+    })
+    .join('');
 
   const deviceRows = devices
-    .sort((a, b) => (a.firstSeenAt || '').localeCompare(b.firstSeenAt || ''))
+    .slice()
+    .sort((a, b) => (b.lastSeenAt || '').localeCompare(a.lastSeenAt || ''))
     .map((d) => {
-      const id = escHtml(d.deviceId);
-      const company = escHtml(d.company || 'Unknown');
-      const note = escHtml(d.note || '');
-      return `
-        <tr data-id="${id}">
-          <td><code class="dev-id">${id}</code></td>
-          <td><input class="inp-company" type="text" value="${company}" maxlength="120" /></td>
-          <td><input class="inp-note" type="text" value="${note}" maxlength="500" placeholder="메모" /></td>
-          <td style="text-align:right">${d.issueCount || 0}</td>
-          <td class="muted">${escHtml(d.firstSeenAt || '')}</td>
-          <td class="muted">${escHtml(d.lastSeenAt || '')}</td>
-          <td class="actions">
-            <button type="button" class="btn-save">저장</button>
-            <button type="button" class="btn-del danger">삭제</button>
-          </td>
-        </tr>`;
+      const id = d.deviceId || '';
+      const company = (d.company || 'Unknown').trim() || 'Unknown';
+      const note = d.note || '';
+      const unknown = company === 'Unknown' ? '1' : '0';
+      const searchBlob = escHtml(
+        [id, company, note, formatKst(d.firstSeenAt), formatKst(d.lastSeenAt)].join(' ').toLowerCase()
+      );
+      return `<tr class="dev-row" data-id="${escHtml(id)}" data-company="${escHtml(
+        company
+      )}" data-unknown="${unknown}" data-search="${searchBlob}">
+        <td>
+          <div class="id-wrap">
+            <code class="id-short" title="${escHtml(id)}">${escHtml(shortId(id))}</code>
+            <button type="button" class="btn-copy" data-copy="${escHtml(id)}" title="전체 ID 복사">복사</button>
+          </div>
+          <div class="id-full muted">${escHtml(id)}</div>
+        </td>
+        <td><input class="inp-company" type="text" value="${escHtml(company)}" maxlength="120" /></td>
+        <td><input class="inp-note" type="text" value="${escHtml(note)}" maxlength="500" placeholder="설치 위치·담당자 등" /></td>
+        <td class="num">${d.issueCount || 0}</td>
+        <td class="muted">${escHtml(formatKst(d.firstSeenAt))}</td>
+        <td class="muted">${escHtml(formatKst(d.lastSeenAt))}</td>
+        <td class="actions">
+          <button type="button" class="btn-save">저장</button>
+          <button type="button" class="btn-del danger">삭제</button>
+        </td>
+      </tr>`;
     })
-    .join('\n');
+    .join('');
 
-  const issuesByCompany = {};
-  for (const iss of issues) {
-    const company = iss.company || 'Unknown';
-    if (!issuesByCompany[company]) issuesByCompany[company] = [];
-    issuesByCompany[company].push(iss);
-  }
+  const recentRows = recentIssues
+    .map(
+      (iss) => `<tr>
+        <td>${escHtml(formatKst(iss.issuedAt))}</td>
+        <td>${escHtml(iss.company || 'Unknown')}</td>
+        <td><code title="${escHtml(iss.deviceId)}">${escHtml(shortId(iss.deviceId))}</code></td>
+      </tr>`
+    )
+    .join('');
 
-  const companyIssueSections = Object.entries(issuesByCompany)
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([company, companyIssues]) => {
+  const historySections = companies
+    .map((c) => {
+      const companyIssues = issues
+        .filter((iss) => ((iss.company || 'Unknown').trim() || 'Unknown') === c.company)
+        .sort((a, b) => (b.issuedAt || '').localeCompare(a.issuedAt || ''));
       const rows = companyIssues
-        .slice()
-        .sort((a, b) => (a.issuedAt || '').localeCompare(b.issuedAt || ''))
         .map(
-          (iss) => `
-            <tr>
-              <td>${escHtml(iss.issuedAt || '')}</td>
-              <td><code>${escHtml(iss.deviceId)}</code></td>
-            </tr>`
+          (iss) => `<tr>
+            <td>${escHtml(formatKst(iss.issuedAt))}</td>
+            <td><code>${escHtml(iss.deviceId)}</code></td>
+          </tr>`
         )
-        .join('\n');
-
-      return `
-        <h3>${escHtml(company)}</h3>
+        .join('');
+      return `<details class="hist-block" data-company="${escHtml(c.company)}" open>
+        <summary><strong>${escHtml(c.company)}</strong> <span class="muted">${companyIssues.length}건 / 디바이스 ${c.devices}대</span></summary>
         <table>
-          <thead><tr><th>발급 시간</th><th>Device ID</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="2">발급 이력 없음</td></tr>'}</tbody>
-        </table>`;
+          <thead><tr><th>발급 시각 (KST)</th><th>Device ID</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="2">이력 없음</td></tr>'}</tbody>
+        </table>
+      </details>`;
     })
-    .join('\n');
+    .join('');
 
   return `<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Scream License Dashboard</title>
+  <title>Scream 라이선스 현황</title>
   <style>
-    :root { --bg:#f5f7fb; --card:#fff; --line:#dde3ee; --ink:#1a1f2e; --muted:#667085; --accent:#1d4ed8; --danger:#b91c1c; --ok:#15803d; }
+    :root {
+      --bg: #eef2f0;
+      --ink: #14201c;
+      --muted: #5b6b64;
+      --card: #ffffff;
+      --line: #d5ddd8;
+      --accent: #0f6b4c;
+      --accent-soft: #e3f2eb;
+      --warn: #9a6700;
+      --warn-bg: #fff7e6;
+      --danger: #b42318;
+      --ok: #067647;
+      --shadow: 0 1px 2px rgba(20,32,28,.06), 0 8px 24px rgba(20,32,28,.06);
+      --radius: 14px;
+    }
     * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: var(--bg); color: var(--ink); }
-    h1 { margin: 0 0 8px; font-size: 1.5rem; }
-    h2 { margin: 28px 0 10px; font-size: 1.1rem; }
-    h3 { margin: 18px 0 8px; font-size: 1rem; }
-    .meta { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
-    .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:end; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:18px; }
-    .toolbar label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
-    .toolbar input { min-width:220px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:13px; }
-    .toolbar .hint { font-size:12px; color:var(--muted); flex:1; min-width:200px; }
-    #status { min-height:1.2em; font-size:13px; margin: 0 0 12px; }
+    body {
+      margin: 0; color: var(--ink);
+      font-family: "Pretendard", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #d9ebe2 0%, transparent 55%),
+        radial-gradient(900px 400px at 100% 0%, #e7efe9 0%, transparent 50%),
+        var(--bg);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; }
+    header.app {
+      display: flex; flex-wrap: wrap; gap: 14px; justify-content: space-between; align-items: flex-end;
+      margin-bottom: 18px;
+    }
+    .brand h1 { margin: 0; font-size: 1.55rem; letter-spacing: -0.02em; }
+    .brand p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--card); border: 1px solid var(--line); border-radius: 999px;
+      padding: 6px 12px; font-size: 12px; color: var(--muted); box-shadow: var(--shadow);
+    }
+    .badge b { color: var(--accent); font-weight: 700; }
+    .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .kpi {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 14px 14px 12px; box-shadow: var(--shadow); min-height: 92px;
+    }
+    .kpi.warn { background: var(--warn-bg); border-color: #f0d79a; }
+    .kpi .label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    .kpi .value { font-size: 1.7rem; font-weight: 750; letter-spacing: -0.03em; line-height: 1.1; }
+    .kpi .sub { margin-top: 6px; font-size: 11px; color: var(--muted); }
+    .panel {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 16px; margin-bottom: 14px;
+    }
+    .panel h2 { margin: 0 0 12px; font-size: 1.05rem; }
+    .panel-head { display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; align-items:center; margin-bottom:12px; }
+    .panel-head h2 { margin: 0; }
+    .nav { display:flex; gap:6px; flex-wrap:wrap; margin-bottom: 14px; }
+    .nav button {
+      border: 1px solid var(--line); background: #fff; color: var(--muted);
+      border-radius: 999px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+    }
+    .nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 650; }
+    .hidden { display: none !important; }
+    .co-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+    .co-card {
+      border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fbfcfb;
+      cursor: pointer; transition: border-color .15s, transform .15s;
+    }
+    .co-card:hover { border-color: #9fbfaf; transform: translateY(-1px); }
+    .co-card.warn { background: var(--warn-bg); }
+    .co-name { font-weight: 700; margin-bottom: 6px; }
+    .co-nums { font-size: 13px; }
+    .co-sub { margin-top: 6px; font-size: 11px; color: var(--muted); }
+    .filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom: 12px; }
+    .filters input, .filters select {
+      border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font-size: 13px; background:#fff;
+    }
+    .filters input[type="search"] { flex: 1; min-width: 180px; }
+    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-bottom: 10px; }
+    .chip {
+      border: 1px solid var(--line); background: #f7faf8; border-radius: 999px;
+      padding: 5px 10px; font-size: 12px; cursor: pointer; color: var(--ink);
+    }
+    .chip span { color: var(--accent); font-weight: 700; margin-left: 4px; }
+    .chip.active { background: var(--accent-soft); border-color: #8fbfa4; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 9px 8px; font-size: 13px; text-align: left; vertical-align: middle; }
+    th { font-size: 12px; color: var(--muted); font-weight: 650; background: #f6f9f7; position: sticky; top: 0; }
+    .table-scroll { overflow: auto; max-height: min(62vh, 720px); border: 1px solid var(--line); border-radius: 12px; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: var(--muted); font-size: 12px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+    .id-wrap { display:flex; gap:6px; align-items:center; }
+    .id-full { margin-top: 3px; word-break: break-all; }
+    input.inp-company, input.inp-note {
+      width: 100%; min-width: 90px; border: 1px solid var(--line); border-radius: 8px;
+      padding: 7px 8px; font-size: 13px; background: #fff;
+    }
+    .actions { white-space: nowrap; }
+    button {
+      cursor: pointer; border: 1px solid var(--line); background: #fff;
+      border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    }
+    button:hover { background: #f4f7f5; }
+    .btn-save { border-color: #9fbfaf; color: var(--accent); font-weight: 700; }
+    .danger { border-color: #f3b0aa; color: var(--danger); }
+    .btn-copy { padding: 3px 7px; font-size: 11px; }
+    .toolbar {
+      display:flex; flex-wrap:wrap; gap:10px; align-items:end;
+      background: #f7faf8; border: 1px dashed #b7c9be; border-radius: 12px; padding: 12px; margin-bottom: 12px;
+    }
+    .toolbar label { display:flex; flex-direction:column; gap:4px; font-size:12px; color: var(--muted); }
+    .toolbar input { min-width: 220px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+    #status { min-height: 1.25em; font-size: 13px; margin: 0 0 10px; }
     #status.ok { color: var(--ok); }
     #status.err { color: var(--danger); }
-    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; background: var(--card); border-radius: 10px; overflow: hidden; }
-    th, td { border: 1px solid var(--line); padding: 8px; font-size: 13px; vertical-align: middle; }
-    th { background: #eef2f8; text-align: left; white-space: nowrap; }
-    code, .dev-id { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; word-break: break-all; }
-    .muted { color: var(--muted); font-size: 12px; white-space: nowrap; }
-    input.inp-company, input.inp-note { width: 100%; min-width: 100px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
-    .actions { white-space: nowrap; }
-    button { cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
-    button:hover { background: #f8fafc; }
-    button.btn-save { border-color: #93c5fd; color: var(--accent); font-weight: 600; }
-    button.danger { border-color: #fecaca; color: var(--danger); }
-    .hidden { display: none !important; }
+    .hist-block { border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; background:#fcfdfc; }
+    .hist-block summary { cursor: pointer; padding: 6px 0; }
+    .split { display:grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
+    .empty { padding: 24px; text-align:center; color: var(--muted); }
+    .footnote { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    tr.dev-row[data-unknown="1"] { background: #fffaf0; }
+    @media (max-width: 960px) {
+      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .split { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .kpis { grid-template-columns: 1fr; }
+      .id-full { display:none; }
+    }
   </style>
 </head>
 <body data-admin-required="${adminRequired}">
-  <h1>Scream License Dashboard</h1>
-  <p class="meta">총 디바이스 ${devices.length} · 발급 이력 ${issues.length} · 저장: ${escHtml(storageMode)}</p>
+  <div class="wrap">
+    <header class="app">
+      <div class="brand">
+        <h1>Scream 라이선스 현황</h1>
+        <p>발급 디바이스·회사·이력을 한곳에서 확인하고 회사명/메모를 정리합니다.</p>
+      </div>
+      <div class="badge">저장소 <b>${escHtml(storageMode)}</b> · 기준 ${escHtml(formatKst(nowIso))}</div>
+    </header>
 
-  <div class="toolbar ${adminRequired === '1' ? '' : 'hidden'}" id="adminBar">
-    <label>관리 토큰 (LICENSE_ADMIN_TOKEN)
-      <input id="adminToken" type="password" autocomplete="off" placeholder="편집 시 필요" />
-    </label>
-    <p class="hint">Render Environment 에 설정한 토큰을 입력하면 회사명·메모 수정/삭제가 가능합니다. 브라우저에만 저장됩니다.</p>
+    <section class="kpis">
+      <div class="kpi"><div class="label">등록 디바이스</div><div class="value">${devices.length}</div><div class="sub">고유 device_id</div></div>
+      <div class="kpi"><div class="label">회사 수</div><div class="value">${companies.length}</div><div class="sub">중복 회사명 기준</div></div>
+      <div class="kpi"><div class="label">총 발급 횟수</div><div class="value">${issues.length}</div><div class="sub">최근 7일 ${recent7d}회</div></div>
+      <div class="kpi warn"><div class="label">회사명 미지정</div><div class="value">${unknownCount}</div><div class="sub">Unknown — 정리 필요</div></div>
+      <div class="kpi"><div class="label">재발급 디바이스</div><div class="value">${reissueCount}</div><div class="sub">발급 2회 이상 · 최근 ${escHtml(formatKst(lastIssueAt))}</div></div>
+    </section>
+
+    <nav class="nav" id="mainNav">
+      <button type="button" class="active" data-tab="overview">한눈 보기</button>
+      <button type="button" data-tab="devices">디바이스 관리</button>
+      <button type="button" data-tab="history">발급 이력</button>
+    </nav>
+
+    <div class="toolbar ${adminRequired === '1' ? '' : 'hidden'}" id="adminBar">
+      <label>관리 토큰
+        <input id="adminToken" type="password" autocomplete="off" placeholder="LICENSE_ADMIN_TOKEN" />
+      </label>
+      <p class="muted" style="margin:0;flex:1;min-width:200px;">편집/삭제 시 필요합니다. 이 브라우저 sessionStorage에만 저장됩니다.</p>
+    </div>
+    <div id="status"></div>
+
+    <section id="tab-overview" class="tab">
+      <div class="split">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>회사별 요약</h2>
+            <span class="muted">카드 클릭 → 디바이스 필터</span>
+          </div>
+          <div class="co-grid">${companyCards || '<div class="empty">등록된 회사가 없습니다.</div>'}</div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>최근 발급</h2><span class="muted">최신 8건</span></div>
+          <div class="table-scroll" style="max-height:420px">
+            <table>
+              <thead><tr><th>시각</th><th>회사</th><th>Device</th></tr></thead>
+              <tbody>${recentRows || '<tr><td colspan="3" class="empty">발급 이력 없음</td></tr>'}</tbody>
+            </table>
+          </div>
+          <p class="footnote">시간이 Asia/Seoul(KST)로 표시됩니다. Unknown 회사는 위에서 바로 정리하세요.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-devices" class="tab hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>디바이스 관리</h2>
+          <span class="muted" id="filterCount">${devices.length}대 표시</span>
+        </div>
+        <div class="filters">
+          <input type="search" id="q" placeholder="회사·Device ID·메모 검색" />
+          <select id="companyFilter">
+            <option value="">전체 회사</option>
+            ${companies
+              .map((c) => `<option value="${escHtml(c.company)}">${escHtml(c.company)} (${c.devices})</option>`)
+              .join('')}
+          </select>
+          <label class="muted" style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="onlyUnknown" /> Unknown만
+          </label>
+        </div>
+        <div class="chips" id="companyChips">
+          <button type="button" class="chip active" data-filter-company="">전체 <span>${devices.length}</span></button>
+          ${companyChips}
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Device ID</th>
+                <th>회사</th>
+                <th>메모</th>
+                <th>발급</th>
+                <th>최초</th>
+                <th>최근</th>
+                <th>동작</th>
+              </tr>
+            </thead>
+            <tbody id="deviceTable">
+              ${deviceRows || '<tr><td colspan="7" class="empty">디바이스 없음</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <p class="footnote">회사명·메모 수정 후 저장하세요. 삭제는 목록에서 제거하며, 확인 시 발급 이력까지 지울 수 있습니다.</p>
+      </div>
+    </section>
+
+    <section id="tab-history" class="tab hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>회사별 발급 이력</h2>
+          <div style="display:flex;gap:6px;">
+            <button type="button" id="expandAll">모두 펼치기</button>
+            <button type="button" id="collapseAll">모두 접기</button>
+          </div>
+        </div>
+        ${historySections || '<div class="empty">발급 이력이 없습니다.</div>'}
+      </div>
+    </section>
   </div>
-  <div id="status"></div>
-
-  <h2>회사별 디바이스 수</h2>
-  <table>
-    <thead><tr><th>회사</th><th>디바이스 수</th></tr></thead>
-    <tbody>${companyRows || '<tr><td colspan="2">데이터 없음</td></tr>'}</tbody>
-  </table>
-
-  <h2>디바이스별 라이선스 정보 (편집 가능)</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Device ID</th>
-        <th>회사</th>
-        <th>메모</th>
-        <th>발급 횟수</th>
-        <th>최초 발급</th>
-        <th>마지막 발급</th>
-        <th>동작</th>
-      </tr>
-    </thead>
-    <tbody id="deviceTable">
-      ${deviceRows || '<tr><td colspan="7">데이터 없음</td></tr>'}
-    </tbody>
-  </table>
-
-  <h2>회사별 발급 이력</h2>
-  ${companyIssueSections || '<p class="meta">발급 이력이 없습니다.</p>'}
-
-  <p class="meta">회사명·메모는 「저장」으로 반영됩니다. 삭제 시 디바이스 목록에서만 제거되며, 발급 이력은 기본 유지됩니다.</p>
 
   <script>
     (function () {
-      const adminRequired = document.body.dataset.adminRequired === '1';
-      const tokenInput = document.getElementById('adminToken');
-      const statusEl = document.getElementById('status');
-      const KEY = 'scream_license_admin_token';
+      var adminRequired = document.body.dataset.adminRequired === '1';
+      var tokenInput = document.getElementById('adminToken');
+      var statusEl = document.getElementById('status');
+      var KEY = 'scream_license_admin_token';
+      var q = document.getElementById('q');
+      var companyFilter = document.getElementById('companyFilter');
+      var onlyUnknown = document.getElementById('onlyUnknown');
+      var filterCount = document.getElementById('filterCount');
 
       if (adminRequired && tokenInput) {
         tokenInput.value = sessionStorage.getItem(KEY) || '';
@@ -801,42 +1065,106 @@ function renderHtmlDashboard() {
       }
 
       function headers() {
-        const h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
-        if (adminRequired && tokenInput && tokenInput.value) {
-          h['X-Admin-Token'] = tokenInput.value;
-        }
+        var h = { 'Content-Type': 'application/json', Accept: 'application/json' };
+        if (adminRequired && tokenInput && tokenInput.value) h['X-Admin-Token'] = tokenInput.value;
         return h;
       }
 
+      function showTab(name) {
+        ['overview', 'devices', 'history'].forEach(function (t) {
+          var el = document.getElementById('tab-' + t);
+          if (el) el.classList.toggle('hidden', t !== name);
+        });
+        document.querySelectorAll('#mainNav button').forEach(function (b) {
+          b.classList.toggle('active', b.getAttribute('data-tab') === name);
+        });
+      }
+
+      document.getElementById('mainNav').addEventListener('click', function (ev) {
+        var btn = ev.target.closest('button[data-tab]');
+        if (!btn) return;
+        showTab(btn.getAttribute('data-tab'));
+      });
+
+      function applyFilter(companyOpt) {
+        if (typeof companyOpt === 'string') {
+          companyFilter.value = companyOpt;
+          onlyUnknown.checked = companyOpt === 'Unknown';
+        }
+        var term = (q.value || '').trim().toLowerCase();
+        var company = companyFilter.value || '';
+        var unk = onlyUnknown.checked;
+        var rows = document.querySelectorAll('#deviceTable tr.dev-row');
+        var shown = 0;
+        rows.forEach(function (tr) {
+          var ok = true;
+          if (company && tr.getAttribute('data-company') !== company) ok = false;
+          if (unk && tr.getAttribute('data-unknown') !== '1') ok = false;
+          if (term && (tr.getAttribute('data-search') || '').indexOf(term) === -1) ok = false;
+          tr.classList.toggle('hidden', !ok);
+          if (ok) shown += 1;
+        });
+        filterCount.textContent = shown + '대 표시';
+        document.querySelectorAll('#companyChips .chip').forEach(function (chip) {
+          var c = chip.getAttribute('data-filter-company') || '';
+          chip.classList.toggle('active', c === company || (!company && c === ''));
+        });
+      }
+
+      q.addEventListener('input', function () { applyFilter(); });
+      companyFilter.addEventListener('change', function () { applyFilter(); });
+      onlyUnknown.addEventListener('change', function () { applyFilter(); });
+
+      document.getElementById('companyChips').addEventListener('click', function (ev) {
+        var chip = ev.target.closest('.chip');
+        if (!chip) return;
+        showTab('devices');
+        applyFilter(chip.getAttribute('data-filter-company') || '');
+      });
+
+      document.querySelectorAll('.co-card').forEach(function (card) {
+        card.addEventListener('click', function () {
+          showTab('devices');
+          applyFilter(card.getAttribute('data-company') || '');
+        });
+      });
+
+      document.getElementById('expandAll').addEventListener('click', function () {
+        document.querySelectorAll('.hist-block').forEach(function (d) { d.open = true; });
+      });
+      document.getElementById('collapseAll').addEventListener('click', function () {
+        document.querySelectorAll('.hist-block').forEach(function (d) { d.open = false; });
+      });
+
       async function saveRow(tr) {
-        const id = tr.getAttribute('data-id');
-        const company = tr.querySelector('.inp-company').value.trim();
-        const note = tr.querySelector('.inp-note').value;
+        var id = tr.getAttribute('data-id');
+        var company = tr.querySelector('.inp-company').value.trim();
+        var note = tr.querySelector('.inp-note').value;
         setStatus('저장 중…');
         try {
-          const res = await fetch('/api/devices/' + encodeURIComponent(id), {
+          var res = await fetch('/api/devices/' + encodeURIComponent(id), {
             method: 'PATCH',
             headers: headers(),
             body: JSON.stringify({ company: company || 'Unknown', note: note }),
           });
-          const data = await res.json().catch(function () { return {}; });
+          var data = await res.json().catch(function () { return {}; });
           if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-          setStatus('저장 완료: ' + id.slice(0, 8) + '…', true);
-          setTimeout(function () { location.reload(); }, 500);
+          setStatus('저장 완료', true);
+          setTimeout(function () { location.reload(); }, 450);
         } catch (e) {
           setStatus('저장 실패: ' + e.message, false);
         }
       }
 
       async function deleteRow(tr) {
-        const id = tr.getAttribute('data-id');
+        var id = tr.getAttribute('data-id');
         if (!confirm('이 디바이스 기록을 삭제할까요?\\n' + id)) return;
-        const purge = confirm('발급 이력까지 함께 삭제할까요?\\n(취소하면 디바이스 목록만 제거)');
+        var purge = confirm('발급 이력까지 함께 삭제할까요?\\n(취소하면 디바이스 목록만 제거)');
         setStatus('삭제 중…');
         try {
-          const url = '/api/devices/' + encodeURIComponent(id) + (purge ? '?purgeIssues=1' : '');
-          const res = await fetch(url, { method: 'DELETE', headers: headers() });
-          const data = await res.json().catch(function () { return {}; });
+          var url = '/api/devices/' + encodeURIComponent(id) + (purge ? '?purgeIssues=1' : '');
+          var res = await fetch(url, { method: 'DELETE', headers: headers() });
+          var data = await res.json().catch(function () { return {}; });
           if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
           setStatus('삭제 완료', true);
           setTimeout(function () { location.reload(); }, 400);
@@ -846,12 +1174,23 @@ function renderHtmlDashboard() {
       }
 
       document.getElementById('deviceTable').addEventListener('click', function (ev) {
-        const t = ev.target;
-        const tr = t.closest('tr[data-id]');
+        var t = ev.target;
+        if (t.classList.contains('btn-copy')) {
+          var v = t.getAttribute('data-copy') || '';
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(v).then(function () { setStatus('Device ID 복사됨', true); });
+          } else {
+            setStatus(v, true);
+          }
+          return;
+        }
+        var tr = t.closest('tr[data-id]');
         if (!tr) return;
         if (t.classList.contains('btn-save')) saveRow(tr);
         if (t.classList.contains('btn-del')) deleteRow(tr);
       });
+
+      applyFilter();
     })();
   </script>
 </body>

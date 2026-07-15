@@ -53,7 +53,10 @@ npm start
 
 ### 통합 HTTP (Render / `LICENSE_HTTP_UNIFIED=1`)
 
-- `GET /` — 발급 이력 HTML 대시보드 (**회사명·메모 웹 편집 / 삭제**)  
+- `GET /` — 담당자용 HTML 대시보드  
+  - **한눈 보기:** KPI(디바이스/회사/발급/Unknown/재발급) · 회사 카드 · 최근 발급  
+  - **디바이스 관리:** 검색·회사 필터 · 회사명/메모 편집 · 삭제  
+  - **발급 이력:** 회사별 접이식 타임라인 (KST 표시)  
 - `GET /health` — 헬스 체크 (Render용)  
 - `GET /api/devices` — 디바이스 목록 JSON  
 - `PATCH /api/devices/:deviceId` — 회사명·메모 수정 (`{"company":"...","note":"..."}`)  
