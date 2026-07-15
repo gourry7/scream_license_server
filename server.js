@@ -1562,7 +1562,7 @@ function renderHtmlDashboard() {
 
       async function deleteCompany(tr) {
         var name = tr.getAttribute('data-from');
-        if (!confirm('회사 “‘ + name + '” 를 삭제할까요?\\n소속 디바이스와 발급 이력이 함께 삭제됩니다.')) return;
+        if (!confirm('회사 [' + name + '] 를 삭제할까요?\\n소속 디바이스와 발급 이력이 함께 삭제됩니다.')) return;
         setStatus('회사 삭제 중…');
         try {
           var res = await fetch('/api/companies', {
