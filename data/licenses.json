@@ -87,6 +87,14 @@
       "lastSeenAt": "2026-07-15T01:42:57.202Z",
       "issueCount": 2,
       "lastSignature": "369b193b49f1b0eb24c567b380cf63e7b4d2d7bbf60f5957f380e36f8ce84ee66011817104a0e63bf2b1369a29a8a7acc4f33eddbea3bbb8d81a3a6d35e42ca2"
+    },
+    "55524b59323230303800000000092f33": {
+      "deviceId": "55524b59323230303800000000092f33",
+      "company": "비상",
+      "firstSeenAt": "2026-07-24T03:02:16.705Z",
+      "lastSeenAt": "2026-07-24T03:02:16.705Z",
+      "issueCount": 1,
+      "lastSignature": "f49c108e8fc3529a603710ca2841d97a3c314a6570588179cb4d29e59e8376d820eb6554735542bc8e1c4a3b75d71571a59600f2b70b8b38a94bbfa4b00cffdd"
     }
   },
   "issues": [
@@ -179,6 +187,11 @@
       "deviceId": "55524b59323230303800000000092f31",
       "company": "test",
       "issuedAt": "2026-07-24T02:04:55.993Z"
+    },
+    {
+      "deviceId": "55524b59323230303800000000092f33",
+      "company": "비상",
+      "issuedAt": "2026-07-24T03:02:16.705Z"
     }
   ],
   "companies": {}
