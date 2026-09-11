@@ -111,6 +111,14 @@
       "lastSeenAt": "2026-08-27T04:50:09.358Z",
       "issueCount": 2,
       "lastSignature": "1859b172867dc7afdcd5a0765786b87ccb47133c8728446908c2a716a643558f1d694b982a2cd7b7d0dc1fe115c26e219d7b581eaf8ae7a8c6724a2203c2f439"
+    },
+    "554a51313538000000000000000a1c25": {
+      "deviceId": "554a51313538000000000000000a1c25",
+      "company": "ansimi_test",
+      "firstSeenAt": "2026-09-11T02:34:02.873Z",
+      "lastSeenAt": "2026-09-11T02:34:02.873Z",
+      "issueCount": 1,
+      "lastSignature": "9fbe41d20589967d3d3f1afc4e87d9d77f87323ba39b4867f7296e9ab195b254213185864337b1a700af80f34145418c0777dd70e9064a5dc867b20b922c41e8"
     }
   },
   "issues": [
@@ -233,6 +241,11 @@
       "deviceId": "554a353232350000000000000013140f",
       "company": "비상벨",
       "issuedAt": "2026-08-27T04:50:09.358Z"
+    },
+    {
+      "deviceId": "554a51313538000000000000000a1c25",
+      "company": "ansimi_test",
+      "issuedAt": "2026-09-11T02:34:02.873Z"
     }
   ],
   "companies": {}
