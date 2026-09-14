@@ -140,8 +140,8 @@
       "deviceId": "554a51313538000000000000000a2310",
       "company": "ansimi_test",
       "firstSeenAt": "2026-09-14T02:42:36.289Z",
-      "lastSeenAt": "2026-09-14T02:43:13.379Z",
-      "issueCount": 2,
+      "lastSeenAt": "2026-09-14T02:44:54.169Z",
+      "issueCount": 3,
       "lastSignature": "5d2f9e0f3dc757117d68b8f2f40f8009909c4d591a915bc6955dcbcb1b39fcee6492d7133e1b68650c39a6a033e1bc5aaf2cea2261a35813884e74d613223505"
     }
   },
@@ -345,6 +345,11 @@
       "deviceId": "554a51313538000000000000000a2310",
       "company": "ansimi_test",
       "issuedAt": "2026-09-14T02:43:13.379Z"
+    },
+    {
+      "deviceId": "554a51313538000000000000000a2310",
+      "company": "ansimi_test",
+      "issuedAt": "2026-09-14T02:44:54.169Z"
     }
   ],
   "companies": {}
