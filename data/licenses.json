@@ -122,10 +122,10 @@
     },
     "554a51313538000000000000000d0a23": {
       "deviceId": "554a51313538000000000000000d0a23",
-      "company": "aa",
+      "company": "as",
       "firstSeenAt": "2026-09-14T01:43:07.111Z",
-      "lastSeenAt": "2026-09-14T01:48:42.593Z",
-      "issueCount": 4,
+      "lastSeenAt": "2026-09-14T01:51:13.598Z",
+      "issueCount": 5,
       "lastSignature": "a5eb35d9412b2c3d480ce633768402c028e6218639e9de688431704923c78311898db2e71a5c684dce165356d7134439939bb0e46711be9c06dd4f6971bd4f0e"
     }
   },
@@ -274,6 +274,11 @@
       "deviceId": "554a51313538000000000000000d0a23",
       "company": "aa",
       "issuedAt": "2026-09-14T01:48:42.593Z"
+    },
+    {
+      "deviceId": "554a51313538000000000000000d0a23",
+      "company": "as",
+      "issuedAt": "2026-09-14T01:51:13.598Z"
     }
   ],
   "companies": {}
