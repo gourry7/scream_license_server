@@ -143,6 +143,14 @@
       "lastSeenAt": "2026-09-14T02:46:28.672Z",
       "issueCount": 5,
       "lastSignature": "5d2f9e0f3dc757117d68b8f2f40f8009909c4d591a915bc6955dcbcb1b39fcee6492d7133e1b68650c39a6a033e1bc5aaf2cea2261a35813884e74d613223505"
+    },
+    "554a51313538000000000000000a1b43": {
+      "deviceId": "554a51313538000000000000000a1b43",
+      "company": "ansimi_test",
+      "firstSeenAt": "2026-09-14T03:40:38.046Z",
+      "lastSeenAt": "2026-09-14T03:40:38.046Z",
+      "issueCount": 1,
+      "lastSignature": "5c09c4fb6e645d0198cbb8b6d51e5b1ec0216a87050300e87b53694d6600c57d98682d307f7077ad18daa50aa908e635bf489946aac81cf911677c7fce1fcca3"
     }
   },
   "issues": [
@@ -360,6 +368,11 @@
       "deviceId": "554a51313538000000000000000a2310",
       "company": "ansimi_test",
       "issuedAt": "2026-09-14T02:46:28.672Z"
+    },
+    {
+      "deviceId": "554a51313538000000000000000a1b43",
+      "company": "ansimi_test",
+      "issuedAt": "2026-09-14T03:40:38.046Z"
     }
   ],
   "companies": {}
